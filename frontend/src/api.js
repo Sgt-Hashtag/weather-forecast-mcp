@@ -1,5 +1,6 @@
 export async function submitQuery(queryText) {
-  const response = await fetch('/query', {  // Proxy handles routing to agent:    method: 'POST',
+  const response = await fetch('/query', {
+    method: 'POST', // 👈 Ensure this is NOT on a comment line
     headers: {
       'Content-Type': 'application/json',
     },

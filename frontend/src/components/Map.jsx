@@ -33,21 +33,27 @@ export default function MapComponent() {
         setError(null);
         setResponse(null);
 
+       // Inside Map.jsx -> handleSubmit function
+
         try {
             const result = await submitQuery(query, API_URL);
             
-            if (!result || !result.forecast) {
-                throw new Error("Invalid response format from agent");
+            // Check for the correct nested structure from your agent.py return statement
+            if (!result || !result.forecast || !result.forecast.forecast) {
+                throw new Error("Invalid response format: Forecast data missing");
             }
 
             setResponse(result);
             
-            // Set buffer for map rendering
             if (result.buffer) {
-                setBufferGeojson(result.buffer); // Directly use the GeoJSON object
+                setBufferGeojson(result.buffer);
 
-                // Fly to buffer centroid
-                const coords = result.buffer.coordinates[0];
+                // ✅ IMPORTANT: Ensure you handle the GeoJSON 'Polygon' type
+                // The buffer returned by tool_buffer is usually a Feature or Polygon
+                const coords = result.buffer.type === 'Feature' 
+                    ? result.buffer.geometry.coordinates[0] 
+                    : result.buffer.coordinates[0];
+
                 const lons = coords.map(pt => pt[0]);
                 const lats = coords.map(pt => pt[1]);
                 const minLon = Math.min(...lons);
@@ -62,7 +68,6 @@ export default function MapComponent() {
                     transitionDuration: 1000
                 });
             }
-            
         } catch (err) {
             setError(err.message || 'Query failed');
             console.error('Query error:', err);
