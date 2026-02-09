@@ -89,7 +89,7 @@ class WeatherAgent:
             
         except Exception as e:
             print(f"!!!!!!!!!!!Intent extraction failed: {e}. Using defaults.")
-            return WeatherIntent(location="chittagong", user_context="FARMER", forecast_days=5)
+            return WeatherIntent(location="dhaka", user_context="CITIZEN", forecast_days=5)
 
     async def process_query(self, user_query: str) -> Dict[str, Any]:
         if not self.initialized:
@@ -201,7 +201,7 @@ class WeatherAgent:
         
         try:
             response = await self.client.aio.models.generate_content(
-                model="gemini-3-flash",
+                model="gemini-2.5-flash",
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_INSTRUCTION,
