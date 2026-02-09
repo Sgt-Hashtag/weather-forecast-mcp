@@ -20,13 +20,13 @@ def buffer_point(latitude: float, longitude: float, radius_km: float) -> str:
         return json.dumps({"error": str(e)})
 
 @mcp.tool()
-def retrieve_weather_forecast(bbox: Dict[str, Any], forecast_days: int, parameters: List[str]) -> str:
+def retrieve_weather_forecast(district_name: str, forecast_days: int, parameters: List[str]) -> str:
     """
     Retrieve weather forecast for bounding box from BMD data.
     Returns a JSON string with forecast data.
     """
     try:
-        return fetch_forecast_logic(bbox, forecast_days, parameters)
+        return fetch_forecast_logic(district_name, forecast_days, parameters)
     except Exception as e:
         return json.dumps({"error": str(e)})
 

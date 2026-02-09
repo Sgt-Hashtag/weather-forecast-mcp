@@ -77,7 +77,7 @@ class WeatherAgent:
         try:
             # Structured Output (JSON) matching our Pydantic schema
             response = await self.client.aio.models.generate_content(
-                model="gemini-2.5-flash", 
+                model="gemini-2.5-flash-lite", 
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
@@ -89,7 +89,7 @@ class WeatherAgent:
             
         except Exception as e:
             print(f"!!!!!!!!!!!Intent extraction failed: {e}. Using defaults.")
-            return WeatherIntent(location="Dhaka", user_context="CITIZEN", forecast_days=3)
+            return WeatherIntent(location="chittagong", user_context="FARMER", forecast_days=5)
 
     async def process_query(self, user_query: str) -> Dict[str, Any]:
         if not self.initialized:
@@ -99,6 +99,7 @@ class WeatherAgent:
         
         # AI Intent Analysis
         intent = await self._analyze_query(user_query)
+        print(f"Intent extracted: {intent}")
         
         location_name = intent.location
         is_farmer = (intent.user_context == "FARMER")
@@ -113,6 +114,7 @@ class WeatherAgent:
         # Geocode 
         location_data = await self.mcp.geocode_location(location_name)
         print(f"Geocoded: {location_data['area_name']} ({location_data['latitude']:.4f}, {location_data['longitude']:.4f})")
+        district_name = location_data.get("district")
         
         #Create Buffer
         buffer_geojson = await self.mcp.create_buffer(
@@ -122,12 +124,14 @@ class WeatherAgent:
         )
         
         # Get Weather Forecast 
-        bbox = self._extract_bbox(buffer_geojson)
+        print(f"DEBUG: Calling get_weather_forecast with district_name={district_name}, days={forecast_days}")
         forecast = await self.mcp.get_weather_forecast(
-            bbox=bbox,
+            district_name=district_name,
             days=forecast_days,
             params=["temperature", "precipitation", "humidity"]
         )
+        print(f"DEBUG: Forecast raw output: {json.dumps(forecast, indent=2)}")
+        print(f"DEBUG: Forecast days retrieved: {len(forecast.get('forecast', []))}")
         print(f"========= Forecast retrieved: {len(forecast.get('forecast', []))} days=========")
         
         # Generate Explanation (Using RESTORED prompts)
@@ -137,12 +141,13 @@ class WeatherAgent:
             is_farmer=is_farmer,
             forecast=forecast
         )
-        
+        print(intent.location)
         return {
             "answer": explanation,
             "buffer": buffer_geojson,
+            "display_location": intent.location,
             "forecast": {
-                "location": location_data,
+                "location": forecast.get("location", location_data),
                 "forecast": forecast.get("forecast", [])[:forecast_days]
             }
         }
@@ -150,10 +155,12 @@ class WeatherAgent:
     async def _generate_explanation(self, user_query: str, location: Dict, is_farmer: bool, forecast: Dict) -> str:
         # chek for empty forecast
         if not forecast.get("forecast"):
+            print("⚠️ Forecast is empty or missing.")
             return self._fallback_explanation(location, is_farmer, forecast)
 
         forecast_text = []
         days_to_summarize = forecast["forecast"][:3]
+        print(f"DEBUG: Preparing explanation for {len(days_to_summarize)} days of forecast")
         
         for i, day in enumerate(days_to_summarize):
             try:
@@ -166,40 +173,48 @@ class WeatherAgent:
                     f"({p['precipitation']['probability']*100:.0f}% chance), "
                     f"Humidity: {p['humidity']['value']}%"
                 )
-            except KeyError:
+            except KeyError as e:
+                print(f"⚠️ Missing key in forecast day {i+1}: {e}")
                 continue
         
         # detailed Generation Prompt
         prompt = f"""
-User Query: {user_query}
-Location: {location['area_name']} ({location['latitude']:.4f}°N, {location['longitude']:.4f}°E)
-Context: {'FARMER (agricultural)' if is_farmer else 'CITIZEN (daily life)'}
-Buffer Radius: {15 if is_farmer else 20}km
-Forecast (next 3 days):
-{chr(10).join(forecast_text)}
+        User Query: {user_query}
+        Location: {location['area_name']} ({location['latitude']:.4f}°N, {location['longitude']:.4f}°E)
+        Context: {'FARMER (agricultural)' if is_farmer else 'CITIZEN (daily life)'}
+        Buffer Radius: {15 if is_farmer else 20}km
+        Forecast (next 3 days):
+        {chr(10).join(forecast_text)}
 
-Generate a natural language explanation that:
-1. Connects weather metrics to user's needs ({'crop health and irrigation' if is_farmer else 'daily commute and comfort'})
-2. Gives actionable advice (not just numbers)
-3. Is 2-3 sentences minimum
-4. Uses metric units (mm for rain, °C for temp)
-5. Mentions location name naturally
+        Generate a natural language explanation that:
+        1. Connects weather metrics to user's needs ({'crop health and irrigation' if is_farmer else 'daily commute and comfort'})
+        2. Gives actionable advice (not just numbers)
+        3. Is 2-3 sentences minimum
+        4. Uses metric units (mm for rain, °C for temp)
+        5. Mentions location name naturally
+        6. Please complete the sentence
 
-RESPONSE (only the explanation text, no JSON or prefixes):
-"""
+        RESPONSE (only the explanation text, no JSON or prefixes):
+        """
+        print("DEBUG: Prompt sent to Gemini model:")
+        print(prompt)
         
         try:
             response = await self.client.aio.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3-flash",
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_INSTRUCTION,
                     temperature=0.3,
-                    max_output_tokens=300
+                    max_output_tokens=1024
                 )
             )
-            return response.text.strip()
-        except Exception:
+            print("✅ Model explanation received:")
+            explanation = response.text.strip()
+            print(explanation)
+            return explanation
+        except Exception as e:
+            print(f"⚠️ Explanation generation failed: {e}")
             return self._fallback_explanation(location, is_farmer, forecast)
 
     def _fallback_explanation(self, location: Dict, is_farmer: bool, forecast: Dict) -> str:
@@ -222,9 +237,3 @@ RESPONSE (only the explanation text, no JSON or prefixes):
                 return f"Forecast for {loc_name}: {rain}mm rain. {advice}. Max temp {temp_max}°C."
         except Exception:
             return f"Forecast available for {loc_name}, but I couldn't generate a summary."
-
-    def _extract_bbox(self, geojson: Dict) -> Dict:
-        coords = geojson["coordinates"][0]
-        lons = [pt[0] for pt in coords]
-        lats = [pt[1] for pt in coords]
-        return {"min_lon": min(lons), "min_lat": min(lats), "max_lon": max(lons), "max_lat": max(lats)}

@@ -1,21 +1,62 @@
 import requests
 from bs4 import BeautifulSoup
 import json
-import math
 import re
 from datetime import datetime, timedelta
 from typing import Dict, Any, List
+import urllib3
+
+# Disable SSL warnings for government sites
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Bengali to English district name mapping
+BENGALI_TO_ENGLISH_DISTRICTS = {
+    "পাবনা": "Pabna", "ঢাকা": "Dhaka", "চট্টগ্রাম": "Chattogram",
+    "কক্সবাজার": "Cox's Bazar", "সিলেট": "Sylhet", "রাজশাহী": "Rajshahi",
+    "খুলনা": "Khulna", "রংপুর": "Rangpur", "বরিশাল": "Barishal",
+    "ময়মনসিংহ": "Mymensingh", "কুমিল্লা": "Cumilla", "দিনাজপুর": "Dinajpur",
+    "যশোর": "Jashore", "বগুড়া": "Bogura", "নোয়াখালী": "Noakhali",
+    "ফেনী": "Feni", "জামালপুর": "Jamalpur", "কিশোরগঞ্জ": "Kishoreganj",
+    "মানিকগঞ্জ": "Manikganj", "মুন্সিগঞ্জ": "Munshiganj", "ফরিদপুর": "Faridpur",
+    "গোপালগঞ্জ": "Gopalganj", "মাদারীপুর": "Madaripur", "রাজবাড়ী": "Rajbari",
+    "শরীয়তপুর": "Shariatpur", "পটুয়াখালী": "Patuakhali", "পিরোজপুর": "Pirojpur",
+    "বরগুনা": "Barguna", "ভোলা": "Bhola", "ঝালকাঠি": "Jhalokati",
+    "লক্ষ্মীপুর": "Lakshmipur", "সাতক্ষীরা": "Satkhira", "বাগেরহাট": "Bagerhat",
+    "বান্দরবান": "Bandarban", "রাঙ্গামাটি": "Rangamati", "খাগড়াছড়ি": "Khagrachari",
+    "ঠাকুরগাঁও": "Thakurgaon", "পঞ্চগড়": "Panchagarh", "লালমনিরহাট": "Lalmonirhat",
+    "কুড়িগ্রাম": "Kurigram", "গাইবান্ধা": "Gaibandha", "নীলফামারী": "Nilphamari",
+    "চাঁপাইনবাবগঞ্জ": "Chapai Nawabganj", "নওগাঁ": "Naogaon", "নড়াইল": "Narail",
+    "নারায়ণগঞ্জ": "Narayanganj", "নরসিংদী": "Narsingdi", "নাটোর": "Natore",
+    "নেত্রকোনা": "Netrokona", "হবিগঞ্জ": "Habiganj", "মৌলভীবাজার": "Moulvibazar",
+    "সুনামগঞ্জ": "Sunamganj", "টাঙ্গাইল": "Tangail", "গাজীপুর": "Gazipur",
+    "চাঁদপুর": "Chandpur", "ব্রাহ্মণবাড়িয়া": "Brahmanbaria", "চুয়াডাঙ্গা": "Chuadanga",
+    "ঝিনাইদহ": "Jhenaidah", "জয়পুরহাট": "Joypurhat", "কুষ্টিয়া": "Kushtia",
+    "মাগুরা": "Magura", "মেহেরপুর": "Meherpur", "শেরপুর": "Sherpur",
+    "সিরাজগঞ্জ": "Sirajganj"
+}
 
 class BMDWeatherScraper:
-    """Scrape BMD WRF forecast data with dynamic column detection"""
-    
     @staticmethod
-    def scrape_forecast(days: int) -> dict:
-        # URL for the requested duration
+    def _normalize_district_name(name: str) -> str:
+        """Normalize district name for matching (remove spaces, special chars)"""
+        return re.sub(r'[\s\'\-]', '', name.lower())
+
+    @staticmethod
+    def scrape_forecast(days: int, target_district: str) -> dict:
         url = f"https://www.bamis.gov.bd/en/bmd/wrf/table/all/{days}/"
         print(f"Scraping BMD WRF {days}-day forecast from: {url}")
         
+        # 1. Handle Bengali to English conversion
+        search_name = target_district.lower().strip()
+        if any('\u0980' <= c <= '\u09FF' for c in search_name):
+            for bengali, english in BENGALI_TO_ENGLISH_DISTRICTS.items():
+                if bengali in search_name or search_name in bengali:
+                    search_name = english.lower()
+                    print(f"🔄 Translated {target_district} to {english}")
+                    break
+
         try:
+            print(f"✅ Input district '{target_district}' assumed to be English, no translation used.")
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
@@ -23,233 +64,60 @@ class BMDWeatherScraper:
             resp.raise_for_status()
             
             soup = BeautifulSoup(resp.text, 'html.parser')
-            tables = soup.find_all('table')
+            table = soup.find('table')
+            if not table: return None
             
-            if not tables:
-                print("No tables found")
-                return BMDWeatherScraper._generate_fallback_data(days)
-            
-            # --- DYNAMIC HEADER MAPPING ---
-            table = tables[0]
-            header_row = table.find('tr')
-            headers_text = [th.get_text(strip=True).lower() for th in header_row.find_all(['th', 'td'])]
-            
-            # Find column indices based on keywords
-            # We look for "rain", "temp", "humidity" in headers
-            idx_rain = -1
-            idx_tmax = -1
-            idx_tmin = -1
-            idx_hum = -1
-            
-            for i, h in enumerate(headers_text):
-                if 'rain' in h: idx_rain = i
-                if 'max' in h and 'temp' in h: idx_tmax = i
-                if 'min' in h and 'temp' in h: idx_tmin = i
-                if 'hum' in h: idx_hum = i
+            rows = table.find_all('tr')[1:] 
+            norm_search = BMDWeatherScraper._normalize_district_name(search_name)
+            print(f"DEBUG: Searching for district '{search_name}' -> normalized '{norm_search}'")
 
-            print(f"🔎 Detected Columns: Rain={idx_rain}, Max={idx_tmax}, Min={idx_tmin}, Hum={idx_hum}")
-
-            rows = table.find_all('tr')[1:]  # Skip header
-            stations = []
-            
             for row in rows:
                 cols = row.find_all(['td', 'th'])
-                if not cols: continue
+                if not cols or len(cols) < 12: continue
                 
-                try:
-                    # Extract Station Name (usually col 0)
-                    name = cols[0].get_text(strip=True)
-                    # Clean up name
-                    if name.lower() in ['station', 'name']: continue
-                    
-                    # Extract Lat/Lon (usually col 1, 2)
-                    # Fallback to default if parsing fails
-                    try:
-                        lat = float(re.findall(r"[-+]?\d*\.\d+|\d+", cols[1].get_text())[0])
-                        lon = float(re.findall(r"[-+]?\d*\.\d+|\d+", cols[2].get_text())[0])
-                    except:
-                        lat, lon = 23.8, 90.4
-                    
-                    # Extract Weather Data using mapped indices
-                    # Helper to safely get float
-                    def get_val(idx, default=0.0):
-                        if idx != -1 and idx < len(cols):
-                            txt = cols[idx].get_text(strip=True)
-                            match = re.search(r"[-+]?\d*\.\d+|\d+", txt)
-                            return float(match.group()) if match else default
-                        return default
+                db_district = cols[0].get_text(strip=True).lower()
+                norm_db = BMDWeatherScraper._normalize_district_name(db_district)
+                print(f"DEBUG: Table row district='{db_district}' -> normalized='{norm_db}'")
 
-                    rain_val = get_val(idx_rain, 0.0)
-                    tmax_val = get_val(idx_tmax, 30.0)
-                    tmin_val = get_val(idx_tmin, 20.0)
-                    hum_val = get_val(idx_hum, 70.0)
-                    
-                    # Generate Daily Forecast
-                    # Since the "All" table often gives a SUMMARY (Aggregate) for the period,
-                    # we distribute this data across the requested 'days'.
-                    
-                    station_forecast = []
-                    today = datetime.now()
-                    
-                    for day_i in range(days):
-                        # Add slight realistic variation so it doesn't look static
-                        # (Rain is distributed, Temp varies slightly)
-                        
-                        # If it's a 3-day total rain, Avg rain/day = total / 3
-                        daily_rain = rain_val / max(1, days)
-                        
-                        # Add variation
-                        var = (day_i % 2) * 0.5 
-                        
-                        station_forecast.append({
-                            "date": (today + timedelta(days=day_i+1)).strftime("%Y-%m-%d"),
+                if norm_search in norm_db or norm_db in norm_search:
+                    print(f"✅ Match found: {db_district}")
+                    try:
+                        # BAMIS Indices: 1:MinT, 3:MaxT, 5:Hum, 10:Rain
+                        t_min = float(re.search(r"[\d\.]+", cols[1].text).group())
+                        t_max = float(re.search(r"[\d\.]+", cols[3].text).group())
+                        hum   = float(re.search(r"[\d\.]+", cols[5].text).group())
+                        rain  = float(re.search(r"[\d\.]+", cols[10].text).group())
+                    except (ValueError, AttributeError, IndexError):
+                        continue
+
+                    daily_rain = round(rain / days, 1) if days > 0 else 0
+                    forecast = []
+                    for i in range(days):
+                        forecast.append({
+                            "date": (datetime.now() + timedelta(days=i+1)).strftime("%Y-%m-%d"),
                             "parameters": {
-                                "temperature": {
-                                    "min": round(tmin_val - var, 1), 
-                                    "max": round(tmax_val + var, 1), 
-                                    "unit": "Celsius"
-                                },
-                                "precipitation": {
-                                    "value": round(daily_rain, 1),
-                                    "unit": "mm", 
-                                    "probability": 0.5 if daily_rain > 0 else 0.0
-                                },
-                                "humidity": {
-                                    "value": round(hum_val, 1), 
-                                    "unit": "percent"
-                                }
+                                "temperature": {"min": t_min, "max": t_max, "unit": "Celsius"},
+                                "precipitation": {"value": daily_rain, "unit": "mm", "probability": min(daily_rain / 10, 1) },
+                                "humidity": {"value": hum, "unit": "percent"}
                             }
                         })
                     
-                    stations.append({
-                        "name": name,
-                        "latitude": lat,
-                        "longitude": lon,
-                        "forecast": station_forecast
-                    })
-
-                except Exception as e:
-                    # Skip bad rows silently
-                    continue
-
-            if not stations:
-                print("Extraction yielded 0 stations. Using fallback.")
-                return BMDWeatherScraper._generate_fallback_data(days)
-                
-            return {"stations": stations}
-
-        except Exception as e:
-            print(f"Scraper Error: {e}")
-            return BMDWeatherScraper._generate_fallback_data(days)
-    
-    @staticmethod
-    def _generate_fallback_data(days: int) -> dict:
-        """Generate minimal fallback data if scraping fails"""
-        from datetime import datetime, timedelta
-        
-        def generate_forecast(lat, lon, base_temp=28.0, base_rain=5.0):
-            forecast = []
-            today = datetime.now()
-            
-            for i in range(days):
-                date = (today + timedelta(days=i+1)).strftime("%Y-%m-%d")
-                
-                temp_variation = (lat - 23.0) * 0.3
-                rain_variation = (lon - 90.0) * 0.5
-                
-                temp_min = base_temp + temp_variation - 4
-                temp_max = base_temp + temp_variation + 3
-                rain_val = max(0, base_rain + rain_variation)
-                humidity = 70.0 + rain_variation
-                
-                forecast.append({
-                    "date": date,
-                    "parameters": {
-                        "temperature": {"min": round(temp_min, 1), "max": round(temp_max, 1), "unit": "Celsius"},
-                        "precipitation": {"value": round(rain_val, 1), "unit": "mm", "probability": round(min(1.0, rain_val / 20.0), 2)},
-                        "humidity": {"value": round(humidity, 1), "unit": "percent"}
+                    return {
+                        "location": {"area_name": db_district.title()},
+                        "forecast": forecast
                     }
-                })
-            return forecast
-        
-        stations = [
-            {"name": "Dhaka", "latitude": 23.7104, "longitude": 90.4074, "forecast": generate_forecast(23.7104, 90.4074, 30.0, 4.0)},
-            {"name": "Chittagong", "latitude": 22.3569, "longitude": 91.7832, "forecast": generate_forecast(22.3569, 91.7832, 29.0, 10.0)},
-            {"name": "Sylhet", "latitude": 24.8949, "longitude": 91.8687, "forecast": generate_forecast(24.8949, 91.8687, 27.0, 8.0)},
-            {"name": "Rajshahi", "latitude": 24.3745, "longitude": 88.6042, "forecast": generate_forecast(24.3745, 88.6042, 32.0, 2.0)}
-        ]
-        
-        return {"stations": stations}
+            return None
+        except Exception as e:
+            print(f"❌ Scraper error: {e}")
+            return None
 
-def get_closest_station(lat: float, lon: float, stations: list) -> dict:
-    """Find closest station to given coordinates"""
-    if not stations:
-        return None
+def retrieve_weather_forecast(district: str, forecast_days: int, parameters: List[str] = None) -> str:
+    data = BMDWeatherScraper.scrape_forecast(forecast_days, district)
     
-    closest = None
-    min_dist = float('inf')
+    if not data:
+        return json.dumps({
+            "error": f"District '{district}' not found in BAMIS table.",
+            "available_districts_hint": "Try English or Bengali script (পাবনা)."
+        })
     
-    for station in stations:
-        try:
-            dist = math.sqrt(
-                (station["latitude"] - lat) ** 2 + 
-                (station["longitude"] - lon) ** 2
-            )
-            
-            if dist < min_dist:
-                min_dist = dist
-                closest = station
-        except (KeyError, TypeError):
-            continue
-    
-    if closest:
-        print(f"Closest station to ({lat:.4f}, {lon:.4f}): {closest['name']} ({min_dist:.4f}°)")
-    
-    return closest
-
-def retrieve_weather_forecast(bbox: Dict[str, Any], forecast_days: int, parameters: List[str]) -> str:
-    """
-    Retrieve weather forecast by scraping BMD WRF table for exactly the requested days.
-    Returns JSON string.
-    
-    Args:
-        bbox: Bounding box with min/max lat/lon
-        forecast_days: Number of days to forecast (1-7)
-        parameters: List of parameters to include (ignored - always returns all 3)
-    
-    Returns:
-        JSON string with forecast data
-    """
-    # DYNAMIC SCRAPING: Scrape exactly the number of days requested
-    bmd_data = BMDWeatherScraper.scrape_forecast(forecast_days)
-    stations = bmd_data.get("stations", [])
-    
-    if not stations:
-        raise RuntimeError("Failed to scrape BMD weather data")
-    
-    # Calculate bbox center (user's location from geocoding)
-    center_lat = (bbox["min_lat"] + bbox["max_lat"]) / 2
-    center_lon = (bbox["min_lon"] + bbox["max_lon"]) / 2
-    
-    print(f"🔍 Finding weather station for location: ({center_lat:.4f}, {center_lon:.4f})")
-    
-    # Find closest station
-    target_station = get_closest_station(center_lat, center_lon, stations)
-    
-    if not target_station:
-        raise RuntimeError("No weather station found near location")
-    
-    # Return forecast data as JSON string
-    result = {
-        "location": {
-            "latitude": target_station["latitude"],
-            "longitude": target_station["longitude"],
-            "area_name": target_station["name"],
-            "source": "bmd_wrf_dynamic_scrape"
-        },
-        "forecast": target_station["forecast"]
-    }
-    
-    print(f"Returning {len(result['forecast'])}-day forecast from: {target_station['name']}")
-    
-    return json.dumps(result)
+    return json.dumps(data)

@@ -143,7 +143,7 @@ export default function MapComponent() {
                         margin: '20px auto 0'
                     }}>
                         <h3 style={{ margin: '0 0 10px 0', color: '#2c3e50' }}>
-                            {response.forecast.location.area_name} Analysis
+                            {response.display_location || response.forecast.location.area_name} Analysis
                         </h3>
                         <p style={{ margin: '0 0 20px 0', lineHeight: 1.6, fontSize: '16px', color: '#444' }}>
                             {response.answer}

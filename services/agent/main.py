@@ -25,6 +25,7 @@ class QueryRequest(BaseModel):
 class QueryResponse(BaseModel):
     answer: str
     buffer: dict
+    display_location: str
     forecast: dict
 
 # Global agent instance (initialized on startup)
