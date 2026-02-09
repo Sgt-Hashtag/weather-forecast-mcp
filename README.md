@@ -2,7 +2,7 @@
 
 A production-ready weather forecasting system for Bangladesh that leverages the **Model Context Protocol (MCP)** to integrate geospatial tools, real-time weather data, and AI reasoning.
 
-![Weather Forecast System Architecture](https://i.imgur.com/weather-forecast-architecture.png)
+![Weather Forecast System Architecture](./WeatherWiseAI.png)
 
 ## 🌟 Features
 
@@ -172,10 +172,6 @@ python services/agent/scripts/test_bmd_scraping.py
 # Verify district extraction
 python -c "from mcp_client import MCPClientManager; print(MCPClientManager()._extract_district_from_query('I am in pabna'))"
 ```
-
-## 📜 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## 🙏 Acknowledgments
 
