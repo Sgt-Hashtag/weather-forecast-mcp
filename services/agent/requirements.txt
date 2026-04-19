@@ -9,3 +9,7 @@ requests==2.31.0
 beautifulsoup4==4.12.3
 python-multipart==0.0.6
 pydantic>=2.11.0
+agribound[gee,prithvi,samgeo]
+segment-geospatial
+earthengine-api
+opencv-python-headless

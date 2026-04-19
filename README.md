@@ -183,3 +183,10 @@ python -c "from mcp_client import MCPClientManager; print(MCPClientManager()._ex
 ---
 
 *Built with ❤️ for Bangladesh's farming and urban communities* 🌾🏙️
+
+
+
+
+# Addendum
+
+https://github.com/montimaj/agribound#google-earth-engine-authentication
