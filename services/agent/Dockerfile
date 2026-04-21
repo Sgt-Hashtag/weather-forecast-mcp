@@ -17,9 +17,10 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
 RUN npm install -g @mapbox/mcp-server@latest --network-timeout=600000
 
 # Install Python dependencies
+RUN pip install --no-cache-dir uv
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN uv pip install --system --no-cache -r requirements.txt
 
 # Copy application code
 COPY . .
