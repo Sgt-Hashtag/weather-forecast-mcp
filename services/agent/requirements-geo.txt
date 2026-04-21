@@ -1,0 +1,7 @@
+agribound[gee,ftw,delineate-anything,samgeo]
+geemap
+rasterio
+geopandas
+segment-geospatial
+earthengine-api
+opencv-python-headless

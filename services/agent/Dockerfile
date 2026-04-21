@@ -1,34 +1,39 @@
-# services/agent/Dockerfile
 FROM python:3.11-slim AS base
 
-# Install system dependencies for geospatial libraries
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
-    build-essential \
-    libgeos-dev \
-    libproj-dev \
-    curl \
+    build-essential libgeos-dev libproj-dev curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Node.js 20 for Mapbox MCP Server
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y nodejs
-
-# Install Mapbox MCP Server globally (CORRECT PACKAGE NAME)
-RUN npm install -g @mapbox/mcp-server@latest --network-timeout=600000
-
-# Install Python dependencies
 WORKDIR /app
+
+# 1. Install Heavy AI Dependencies (Cache this once)
+COPY requirements-core.txt .
+RUN pip install --no-cache-dir --prefer-binary \
+    --index-url https://download.pytorch.org/whl/cpu \
+    -r requirements-core.txt
+
+# 2. Install Geospatial Dependencies (Cache this once)
+COPY requirements-geo.txt .
+RUN pip install --no-cache-dir --prefer-binary -r requirements-geo.txt
+
+# 3. Install App Dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy model checkpoints
+RUN apt-get update && apt-get install -y wget && rm -rf /var/lib/apt/lists/*
+
+#model (approx 2.5GB)
+
+RUN mkdir -p /app/models && \
+    wget -O /app/models/sam_vit_h_4b8939.pth https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth
+
+# 3. Set the path so your processor code can find it
+ENV SAM_CHECKPOINT=/app/models/sam_vit_h_4b8939.pth
+
+# Copy application code last (Changes often, doesn't break cache)
 COPY . .
-
-# Fetch BMD data at BUILD TIME
-# RUN python /app/scripts/fetch_bmd_data.py
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=5 \
-    CMD python -c "import requests; exit(0) if requests.get('http://localhost:8000/health', timeout=5).status_code == 200 else exit(1)"
 
 EXPOSE 8000
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
