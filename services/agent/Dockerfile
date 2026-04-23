@@ -1,9 +1,23 @@
-FROM python:3.11-slim AS base
+FROM python:3.12-slim-bookworm
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    build-essential libgeos-dev libproj-dev curl \
+# Install GDAL, Node.js and system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gdal-bin \
+    libgdal-dev \
+    libgeos-dev \
+    libproj-dev \
+    wget \
+    curl \
+    gnupg \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js for npx (Mapbox MCP)
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CPLUS_INCLUDE_PATH=/usr/include/gdal
+ENV C_INCLUDE_PATH=/usr/include/gdal
 
 WORKDIR /app
 
@@ -29,11 +43,12 @@ RUN apt-get update && apt-get install -y wget && rm -rf /var/lib/apt/lists/*
 RUN mkdir -p /app/models && \
     wget -O /app/models/sam_vit_h_4b8939.pth https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth
 
-# 3. Set the path so your processor code can find it
 ENV SAM_CHECKPOINT=/app/models/sam_vit_h_4b8939.pth
 
-# Copy application code last (Changes often, doesn't break cache)
+# Copy application code
 COPY . .
 
+WORKDIR /app
+
 EXPOSE 8000
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

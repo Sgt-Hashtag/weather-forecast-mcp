@@ -22,6 +22,7 @@ export default function MapComponent() {
     const [query, setQuery] = useState('');
     const [response, setResponse] = useState(null);
     const [bufferGeojson, setBufferGeojson] = useState(null);
+    const [fieldsGeojson, setFieldsGeojson] = useState(null);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState(null);
 
@@ -33,8 +34,6 @@ export default function MapComponent() {
         setError(null);
         setResponse(null);
 
-       // Inside Map.jsx -> handleSubmit function
-
         try {
             const result = await submitQuery(query, API_URL);
             
@@ -45,28 +44,47 @@ export default function MapComponent() {
 
             setResponse(result);
             
+            // Handle field boundaries
+            if (result.fields) {
+                setFieldsGeojson(result.fields);
+                console.log("Fields loaded:", result.field_count);
+            } else {
+                setFieldsGeojson(null);
+            }
+            
             if (result.buffer) {
                 setBufferGeojson(result.buffer);
 
-                // ✅ IMPORTANT: Ensure you handle the GeoJSON 'Polygon' type
-                // The buffer returned by tool_buffer is usually a Feature or Polygon
-                const coords = result.buffer.type === 'Feature' 
-                    ? result.buffer.geometry.coordinates[0] 
-                    : result.buffer.coordinates[0];
+                // Handle GeoJSON 'Feature' or 'Polygon' type
+                let coords;
+                if (!result.buffer.type) {
+                    // Invalid or missing type
+                    console.warn("Buffer has no type:", result.buffer);
+                    coords = [[0, 0], [1, 1], [1, 0], [0, 0]]; // fallback
+                } else if (result.buffer.type === 'Feature') {
+                    coords = result.buffer.geometry?.coordinates?.[0] || [];
+                } else if (result.buffer.type === 'Polygon') {
+                    coords = result.buffer.coordinates?.[0] || [];
+                } else {
+                    coords = [];
+                }
+                
+                // Only zoom if we have valid coords
+                if (coords && coords.length > 0) {
+                    const lons = coords.map(pt => pt[0]);
+                    const lats = coords.map(pt => pt[1]);
+                    const minLon = Math.min(...lons);
+                    const maxLon = Math.max(...lons);
+                    const minLat = Math.min(...lats);
+                    const maxLat = Math.max(...lats);
 
-                const lons = coords.map(pt => pt[0]);
-                const lats = coords.map(pt => pt[1]);
-                const minLon = Math.min(...lons);
-                const maxLon = Math.max(...lons);
-                const minLat = Math.min(...lats);
-                const maxLat = Math.max(...lats);
-
-                setViewState({
-                    longitude: (minLon + maxLon) / 2,
-                    latitude: (minLat + maxLat) / 2,
-                    zoom: 10,
-                    transitionDuration: 1000
-                });
+                    setViewState({
+                        longitude: (minLon + maxLon) / 2,
+                        latitude: (minLat + maxLat) / 2,
+                        zoom: 12,
+                        transitionDuration: 1000
+                    });
+                }
             }
         } catch (err) {
             setError(err.message || 'Query failed');
@@ -149,6 +167,26 @@ export default function MapComponent() {
                             {response.answer}
                         </p>
                         
+                        {/* Field info */}
+                        {response.field_count && (
+                            <div style={{ 
+                                marginBottom: '20px',
+                                padding: '15px',
+                                backgroundColor: '#d4edda',
+                                borderRadius: '8px',
+                                border: '1px solid #c3e6cb'
+                            }}>
+                                <div style={{ fontWeight: 'bold', fontSize: '16px', color: '#155724', marginBottom: '8px' }}>
+                                    🌾 Agricultural Fields Detected: {response.field_count}
+                                </div>
+                                {response.field_delineation?.message && (
+                                    <div style={{ fontSize: '14px', color: '#155724' }}>
+                                        {response.field_delineation.message}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                        
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '15px' }}>
                             {response.forecast.forecast && response.forecast.forecast.map((day, i) => (
                                 <div key={i} style={{ 
@@ -205,6 +243,28 @@ export default function MapComponent() {
                                     'line-color': '#007bff',
                                     'line-width': 2,
                                     'line-dasharray': [2, 2]
+                                }}
+                            />
+                        </Source>
+                    )}
+                    
+                    {/* Field boundaries */}
+                    {fieldsGeojson && (
+                        <Source id="fields-source" type="geojson" data={fieldsGeojson}>
+                            <Layer
+                                id="fields-fill"
+                                type="fill"
+                                paint={{
+                                    'fill-color': '#28a745',
+                                    'fill-opacity': 0.4
+                                }}
+                            />
+                            <Layer
+                                id="fields-outline"
+                                type="line"
+                                paint={{
+                                    'line-color': '#1e7e34',
+                                    'line-width': 2
                                 }}
                             />
                         </Source>

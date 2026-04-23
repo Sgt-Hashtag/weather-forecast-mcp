@@ -27,6 +27,9 @@ class QueryResponse(BaseModel):
     buffer: dict
     display_location: str
     forecast: dict
+    field_delineation: dict = None
+    fields: dict = None
+    field_count: int = None
 
 # Global agent instance (initialized on startup)
 agent = None

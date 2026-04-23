@@ -21,6 +21,9 @@ class WeatherIntent(BaseModel):
     forecast_days: int = Field(
         description="Number of days requested (1-7). If not explicitly mentioned, default to 5 for FARMER and 3 for CITIZEN."
     )
+    task_type: Literal["FORECAST", "FIELD_DELINEATION", "BOTH"] = Field(
+        description="Determine if user wants weather forecast, field boundary delineation, or both. Default to FORECAST."
+    )
 
 # detailed System Instruction
 SYSTEM_INSTRUCTION = """
@@ -30,6 +33,11 @@ CONTEXT DETECTION:
 - FARMER: User mentions "farmer", "crop", "field", "harvest", "irrigation", "soil", "agriculture", "plant", "seed", "paddy", "rice"
 - CITIZEN: User mentions "commute", "travel", "outdoor", "event", "clothing", "daily", "umbrella", "road", "traffic"
 - DEFAULT: Treat as citizen if unclear
+
+TASK TYPE DETECTION:
+- FIELD_DELINEATION: User mentions "field boundary", "delineate", "my land", "farm boundary", "field edges", "plot", "drainage"
+- FORECAST: User wants weather information
+- BOTH: User wants both
 
 RULES:
 1. ALWAYS use the provided tools - never make up weather data.
@@ -72,6 +80,7 @@ class WeatherAgent:
         - Detect the location (e.g. "Pabna").
         - Detect if the user is a FARMER or CITIZEN based on intent.
         - Determine the forecast duration (e.g. "next week" = 7 days, "tomorrow" = 1 day).
+        - Determine task type: FORECAST, FIELD_DELINEATION, or BOTH based on whether user mentions field boundaries, land delineation, or farm mapping.
         """
         
         try:
@@ -89,7 +98,7 @@ class WeatherAgent:
             
         except Exception as e:
             print(f"!!!!!!!!!!!Intent extraction failed: {e}. Using defaults.")
-            return WeatherIntent(location="dhaka", user_context="CITIZEN", forecast_days=5)
+            return WeatherIntent(location="dhaka", user_context="CITIZEN", forecast_days=5, task_type="FORECAST")
 
     async def process_query(self, user_query: str) -> Dict[str, Any]:
         if not self.initialized:
@@ -105,16 +114,23 @@ class WeatherAgent:
         is_farmer = (intent.user_context == "FARMER")
         forecast_days = max(1, min(7, intent.forecast_days)) 
         radius_km = 15 if is_farmer else 20
+        task_type = intent.task_type
         
         print(f"AI Intent Detected:")
         print(f"   - Location: {location_name}")
         print(f"   - Context: {intent.user_context}")
         print(f"   - Days: {forecast_days}")
+        print(f"   - Task: {task_type}")
         
         # Geocode 
         location_data = await self.mcp.geocode_location(location_name)
+        if not location_data:
+            raise ValueError(f"Could not geocode location: {location_name}")
+        
         print(f"Geocoded: {location_data['area_name']} ({location_data['latitude']:.4f}, {location_data['longitude']:.4f})")
         district_name = location_data.get("district")
+        if not district_name:
+            district_name = location_data.get("area_name", location_name)
         
         #Create Buffer
         buffer_geojson = await self.mcp.create_buffer(
@@ -123,34 +139,62 @@ class WeatherAgent:
             radius_km
         )
         
-        # Get Weather Forecast 
-        print(f"DEBUG: Calling get_weather_forecast with district_name={district_name}, days={forecast_days}")
-        forecast = await self.mcp.get_weather_forecast(
-            district_name=district_name,
-            days=forecast_days,
-            params=["temperature", "precipitation", "humidity"]
-        )
-        print(f"DEBUG: Forecast raw output: {json.dumps(forecast, indent=2)}")
-        print(f"DEBUG: Forecast days retrieved: {len(forecast.get('forecast', []))}")
-        print(f"========= Forecast retrieved: {len(forecast.get('forecast', []))} days=========")
-        
-        # Generate Explanation (Using RESTORED prompts)
-        explanation = await self._generate_explanation(
-            user_query=user_query,
-            location=location_data,
-            is_farmer=is_farmer,
-            forecast=forecast
-        )
-        print(intent.location)
-        return {
-            "answer": explanation,
+        response_data = {
             "buffer": buffer_geojson,
             "display_location": intent.location,
-            "forecast": {
+            "forecast": {"location": location_data, "forecast": []}
+        }
+        
+        # Handle field delineation task
+        if task_type in ("FIELD_DELINEATION", "BOTH"):
+            try:
+                print(f"DEBUG: Calling delineate_field_boundaries for lat={location_data['latitude']}, lon={location_data['longitude']}")
+                delineation_result = await self.mcp.delineate_field_boundaries(
+                    location_data["latitude"],
+                    location_data["longitude"]
+                )
+                response_data["field_delineation"] = delineation_result
+                # Also pass fields for map display
+                if delineation_result.get("fields_geojson"):
+                    response_data["fields"] = delineation_result["fields_geojson"]
+                if delineation_result.get("field_count"):
+                    response_data["field_count"] = delineation_result["field_count"]
+            except Exception as e:
+                print(f"⚠️ Field delineation failed: {e}")
+                response_data["field_delineation"] = {"error": str(e)}
+        
+        # Handle weather forecast task
+        if task_type in ("FORECAST", "BOTH"):
+            print(f"DEBUG: Calling get_weather_forecast with district_name={district_name}, days={forecast_days}")
+            forecast = await self.mcp.get_weather_forecast(
+                district_name=district_name,
+                days=forecast_days,
+                params=["temperature", "precipitation", "humidity"]
+            )
+            print(f"DEBUG: Forecast raw output: {json.dumps(forecast, indent=2)}")
+            print(f"DEBUG: Forecast days retrieved: {len(forecast.get('forecast', []))}")
+            print(f"========= Forecast retrieved: {len(forecast.get('forecast', []))} days=========")
+            
+            # Generate Explanation
+            explanation = await self._generate_explanation(
+                user_query=user_query,
+                location=location_data,
+                is_farmer=is_farmer,
+                forecast=forecast
+            )
+            print(intent.location)
+            response_data["answer"] = explanation
+            response_data["forecast"] = {
                 "location": forecast.get("location", location_data),
                 "forecast": forecast.get("forecast", [])[:forecast_days]
             }
-        }
+        
+        if task_type == "FIELD_DELINEATION" and "answer" not in response_data:
+            response_data["answer"] = f"Agricultural field boundaries have been delineated for {location_data['area_name']}. The boundaries are shown on the map."
+        
+        print(f"DEBUG: Final response_data keys: {list(response_data.keys())}")
+        print(f"DEBUG: Has field_delineation: {'field_delineation' in response_data}")
+        return response_data
     
     async def _generate_explanation(self, user_query: str, location: Dict, is_farmer: bool, forecast: Dict) -> str:
         # chek for empty forecast
