@@ -6,6 +6,8 @@ from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s %(message)s")
 log = logging.getLogger("bamis")
@@ -15,6 +17,19 @@ BASE_URL = "https://www.bamis.gov.bd"
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
 }
+
+RETRY = Retry(
+    total=3,
+    connect=3,
+    read=3,
+    backoff_factor=1.0,
+    status_forcelist=(429, 500, 502, 503, 504),
+    allowed_methods=frozenset({"GET", "HEAD"}),
+)
+
+SESSION = requests.Session()
+SESSION.mount("http://", HTTPAdapter(max_retries=RETRY))
+SESSION.mount("https://", HTTPAdapter(max_retries=RETRY))
 
 seen_pdfs = set()
 discovered_pdfs = set()
@@ -133,7 +148,7 @@ def download_pdf(pdf_url, dest):
 
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        resp = requests.get(pdf_url, headers=HEADERS, timeout=60)
+        resp = SESSION.get(pdf_url, headers=HEADERS, timeout=60)
         resp.raise_for_status()
 
         content = resp.content
@@ -150,7 +165,7 @@ def download_pdf(pdf_url, dest):
 
 def fetch_soup(url):
     """GET ``url`` and return ``(BeautifulSoup, raw_text)``; raises on non-2xx."""
-    resp = requests.get(url, headers=HEADERS, timeout=30)
+    resp = SESSION.get(url, headers=HEADERS, timeout=30)
     resp.raise_for_status()
     return BeautifulSoup(resp.text, "html.parser"), resp.text
 

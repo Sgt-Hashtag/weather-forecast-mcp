@@ -78,7 +78,11 @@ def collect_district_bulletins(out_root):
     PDF or ``view_<id>_rendered.pdf``.
     """
     results = []
-    districts = iter_districts_en()
+    try:
+        districts = iter_districts_en()
+    except Exception as e:
+        core.log.warning("district/listing failed: %s", e)
+        return [f"===== FAILED district/listing: {e}"]
     core.log.info("district: %d entries from EN select", len(districts))
 
     for dist_id, _label, folder_name in districts:

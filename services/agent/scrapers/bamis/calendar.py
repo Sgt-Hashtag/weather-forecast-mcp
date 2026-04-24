@@ -1,7 +1,6 @@
 """Crop × region agri calendar PDFs (BAMIS calendar pages)."""
 
 from bs4 import BeautifulSoup
-import requests
 
 from . import core
 
@@ -36,7 +35,7 @@ def scrape_page(task):
     url = f"https://www.bamis.gov.bd/en/calendar/1/{crop_id}/{region_id}/"
 
     try:
-        resp = requests.get(url, headers=core.HEADERS, timeout=30)
+        resp = core.SESSION.get(url, headers=core.HEADERS, timeout=30)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
 
@@ -60,7 +59,7 @@ def scrape_page(task):
         if pdf_path.exists():
             return f"+++ Exists: {crop} X {region}"
 
-        pdf_resp = requests.get(pdf_url, headers=core.HEADERS, timeout=30)
+        pdf_resp = core.SESSION.get(pdf_url, headers=core.HEADERS, timeout=30)
         pdf_resp.raise_for_status()
 
         with open(pdf_path, "wb") as f:
