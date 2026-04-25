@@ -3,6 +3,8 @@ services:
     build: ./services/agent
     ports:
       - "8000:8000"
+    stdin_open: true
+    tty: true
     environment:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - MAPBOX_ACCESS_TOKEN=${MAPBOX_ACCESS_TOKEN}
@@ -18,19 +20,16 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 25s
+      start_period: 60s
   frontend:
     build: ./frontend
     ports:
-      - "3000:3000"
+      - "3000:80"
     environment:
       - VITE_MAPBOX_TOKEN=${MAPBOX_ACCESS_TOKEN}
     depends_on:
       agent:
         condition: service_healthy
-    # volumes:
-    #   - ./frontend/src:/app/src
-    #   - ./frontend/public:/app/public
 
 networks:
   default:

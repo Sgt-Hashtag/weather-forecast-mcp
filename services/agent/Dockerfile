@@ -48,7 +48,14 @@ ENV SAM_CHECKPOINT=/app/models/sam_vit_h_4b8939.pth
 # Copy application code
 COPY . .
 
+# Setup secrets directory
+RUN mkdir -p /app/secrets
+
+# Make entrypoint executable
+RUN chmod +x /app/entrypoint.sh
+
 WORKDIR /app
 
 EXPOSE 8000
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

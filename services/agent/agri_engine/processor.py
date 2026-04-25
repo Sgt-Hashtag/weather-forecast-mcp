@@ -32,29 +32,6 @@ def init_gee():
     
     print("No GEE credentials - using simulated field boundaries")
     return False
-    
-    if gee_project or gee_key:
-        try:
-            if gee_key and gee_key != '{}':
-                # Write service account key to temp file
-                import json
-                key_data = json.loads(gee_key)
-                key_path = "/tmp/gee_key.json"
-                with open(key_path, 'w') as f:
-                    json.dump(key_data, f)
-                credentials = ee.ServiceAccountCredentials.from_service_account_file(key_path)
-                ee.Initialize(credentials=credentials)
-            elif gee_project:
-                ee.Initialize(project=gee_project)
-            print(f"GEE initialized successfully")
-            return True
-        except Exception as e:
-            print(f"GEE init failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-    print("No GEE credentials found")
-    return False
 
 # Try to initialize GEE on module load
 GEE_INITIALIZED = init_gee()
@@ -67,11 +44,13 @@ class AgriProcessor:
     def process_field(self, lat, lon, boundaries_path=None):
         """
         Delineate agricultural field boundaries using agribound with GEE.
+        Then classify crops using FTW (Field of the World).
         Only uses GEE if properly authenticated, otherwise falls back to simulated.
         """
         import os
         aoi_path = create_aoi_file(lat, lon)
-        out_path = boundaries_path or "/tmp/field_boundaries.geojson"
+        boundaries_out = boundaries_path or "/tmp/field_boundaries.geojson"
+        classified_out = "/tmp/classified_fields.geojson"
         gee_project = self.gee_project or os.getenv("GEE_PROJECT_ID")
         
         # Try AGRIBOUND with GEE if credentialed
@@ -91,18 +70,17 @@ class AgriProcessor:
                 
                 # Try initializing if not already done
                 try:
+                    import ee
                     if creds_found:
-                        import ee
                         credentials = ee.ServiceAccountCredentials.from_service_account_file(creds_found)
                         ee.Initialize(credentials=credentials)
                     elif gee_project:
-                        import ee
                         ee.Initialize(project=gee_project)
                     print(f"GEE initialized")
                 except Exception as init_err:
                     print(f"GEE already initialized or: {init_err}")
                 
-                # Now try agribound
+                # Step 1: Delineate field boundaries using delineate-anything
                 agribound.delineate(
                     study_area=aoi_path,
                     source="sentinel2",
@@ -110,20 +88,62 @@ class AgriProcessor:
                     engine="delineate-anything", 
                     engine_params={"checkpoint": self.sam_path},
                     gee_project=gee_project,
-                    output_path=out_path
+                    output_path=boundaries_out
                 )
-                print("GEE/agribound delineation complete!")
+                print("Step 1: Field boundaries delineated!")
                 use_gee = True
                 
-                import geopandas as gpd
-                gdf = gpd.read_file(out_path)
-                return {
-                    "status": "Success",
-                    "bounds_file": out_path,
-                    "field_count": len(gdf),
-                    "bounds_geojson": json.loads(gdf.to_json()),
-                    "source": "gee"
-                }
+                # Step 2: Classify crops using FTW
+                try:
+                    print("Step 2: Running FTW crop classification...")
+                    agribound.delineate(
+                        study_area=boundaries_out,
+                        source="sentinel2",
+                        year=2026,
+                        engine="ftw",
+                        gee_project=gee_project,
+                        output_path=classified_out
+                    )
+                    print("Step 2: Crop classification complete!")
+                    
+                    # Use the classified results
+                    import geopandas as gpd
+                    gdf = gpd.read_file(classified_out)
+                    
+                    # Extract crop types from classification
+                    crop_info = []
+                    for idx, row in gdf.iterrows():
+                        props = row.to_dict()
+                        crop_type = props.get('crop_type', props.get('predicted_crop', 'Unknown'))
+                        confidence = props.get('confidence', props.get('score', 0.8))
+                        crop_info.append({
+                            'crop': crop_type,
+                            'confidence': confidence
+                        })
+                    
+                    return {
+                        "status": "Success",
+                        "bounds_file": boundaries_out,
+                        "field_count": len(gdf),
+                        "bounds_geojson": json.loads(gdf.to_json()),
+                        "source": "gee",
+                        "crop_classification": crop_info
+                    }
+                except Exception as ftw_err:
+                    print(f"FTW classification failed: {ftw_err}")
+                    # Still return the boundary results even if FTW fails
+                    import geopandas as gpd
+                    gdf = gpd.read_file(boundaries_out)
+                    return {
+                        "status": "Success",
+                        "bounds_file": boundaries_out,
+                        "field_count": len(gdf),
+                        "bounds_geojson": json.loads(gdf.to_json()),
+                        "source": "gee",
+                        "crop_classification": None,
+                        "note": "FTW classification unavailable"
+                    }
+                    
             except Exception as e:
                 print(f"GEE agribound failed: {e}")
                 print("Falling back to simulated field boundaries")
@@ -133,12 +153,12 @@ class AgriProcessor:
             print("Using SIMULATED field boundaries (GEE not authenticated)")
             fields_geojson = self._generate_field_polygons(lat, lon)
             
-            with open(out_path, 'w') as f:
+            with open(boundaries_out, 'w') as f:
                 json.dump(fields_geojson, f)
             
             return {
                 "status": "Success",
-                "bounds_file": out_path,
+                "bounds_file": boundaries_out,
                 "field_count": len(fields_geojson.get("features", [])),
                 "bounds_geojson": fields_geojson,
                 "source": "simulated"

@@ -3,12 +3,13 @@ FROM node:18-alpine
 
 WORKDIR /app
 
-# Install dependencies first (better caching)
+# Install dependencies
 COPY package*.json ./
 RUN npm install
 
-# Copy source code
+# Build for production
 COPY . .
+RUN npm run build
 
 EXPOSE 3000
 
