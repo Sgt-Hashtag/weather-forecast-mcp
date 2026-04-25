@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Field Boundaries Preview</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    html, body { margin: 0; height: 100%; }
+    #map { width: 100%; height: 100%; }
+    .title {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 1000;
+      background: rgba(255, 255, 255, 0.92);
+      border: 1px solid #d0d0d0;
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-family: Arial, sans-serif;
+      font-size: 14px;
+      line-height: 1.3;
+    }
+    .poly-label {
+      font: 600 12px/1.2 Arial, sans-serif;
+      color: #111;
+      text-shadow: 0 0 2px #fff, 0 0 4px #fff;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <div class="title"><strong>Field Segmentation Result</strong><br/>Satellite basemap + polygon labels</div>
+  <div id="map"></div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const geojson = {"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {"field_id": "field_1", "crop_type": "Maize", "area_ha": 0.06, "confidence": 0.73}, "geometry": {"type": "Polygon", "coordinates": [[[90.40984196193318, 23.80712825951937], [90.41510865012665, 23.80712825951937], [90.41510865012665, 23.810288272435454], [90.40984196193318, 23.810288272435454], [90.40984196193318, 23.80712825951937]]]}}, {"type": "Feature", "properties": {"field_id": "field_2", "crop_type": "Rice", "area_ha": 0.06, "confidence": 0.9}, "geometry": {"type": "Polygon", "coordinates": [[[90.41095382106455, 23.809887509664403], [90.4162475144331, 23.809887509664403], [90.4162475144331, 23.813063725685534], [90.41095382106455, 23.813063725685534], [90.41095382106455, 23.809887509664403]]]}}, {"type": "Feature", "properties": {"field_id": "field_3", "crop_type": "Rice", "area_ha": 0.16, "confidence": 0.92}, "geometry": {"type": "Polygon", "coordinates": [[[90.40919626100064, 23.8057398714312], [90.4182167189713, 23.8057398714312], [90.4182167189713, 23.811152146213594], [90.40919626100064, 23.811152146213594], [90.40919626100064, 23.8057398714312]]]}}, {"type": "Feature", "properties": {"field_id": "field_4", "crop_type": "Vegetables", "area_ha": 0.2, "confidence": 0.78}, "geometry": {"type": "Polygon", "coordinates": [[[90.40899547650639, 23.80699911333626], [90.41895627903929, 23.80699911333626], [90.41895627903929, 23.812975594856006], [90.40899547650639, 23.812975594856006], [90.40899547650639, 23.80699911333626]]]}}, {"type": "Feature", "properties": {"field_id": "field_5", "crop_type": "Pulses", "area_ha": 0.04, "confidence": 0.7}, "geometry": {"type": "Polygon", "coordinates": [[[90.41006725550254, 23.80964155703033], [90.4144960439475, 23.80964155703033], [90.4144960439475, 23.812298830097294], [90.41006725550254, 23.812298830097294], [90.41006725550254, 23.80964155703033]]]}}, {"type": "Feature", "properties": {"field_id": "field_6", "crop_type": "Vegetables", "area_ha": 0.06, "confidence": 0.76}, "geometry": {"type": "Polygon", "coordinates": [[[90.40786835155555, 23.80680915408911], [90.41339759432591, 23.80680915408911], [90.41339759432591, 23.810126699751336], [90.40786835155555, 23.810126699751336], [90.40786835155555, 23.80680915408911]]]}}, {"type": "Feature", "properties": {"field_id": "field_7", "crop_type": "Vegetables", "area_ha": 0.19, "confidence": 0.95}, "geometry": {"type": "Polygon", "coordinates": [[[90.40870248739306, 23.808220046801775], [90.41841571116483, 23.808220046801775], [90.41841571116483, 23.814047981064842], [90.40870248739306, 23.814047981064842], [90.40870248739306, 23.808220046801775]]]}}, {"type": "Feature", "properties": {"field_id": "field_8", "crop_type": "Vegetables", "area_ha": 0.08, "confidence": 0.71}, "geometry": {"type": "Polygon", "coordinates": [[[90.40831919223614, 23.80712824367616], [90.41472570375792, 23.80712824367616], [90.41472570375792, 23.81097215058923], [90.40831919223614, 23.81097215058923], [90.40831919223614, 23.80712824367616]]]}}]};
+    const map = L.map('map', { zoomControl: true });
+    const satellite = L.tileLayer(
+      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      { maxZoom: 20, attribution: '&copy; Esri, Maxar, Earthstar Geographics, and the GIS User Community' }
+    ).addTo(map);
+
+    const layer = L.geoJSON(geojson, {
+      style: { color: '#ffae00', weight: 2, fillColor: '#ffd166', fillOpacity: 0.25 },
+      onEachFeature: (feature, l) => {
+        const p = feature.properties || {};
+        const field = p.field_id || 'unknown';
+        const crop = p.crop_type || 'unknown';
+        const conf = (typeof p.confidence === 'number') ? p.confidence : 'n/a';
+        const area = (typeof p.area_ha === 'number') ? p.area_ha : 'n/a';
+        l.bindTooltip(`${field} (${crop})`, { permanent: true, direction: 'center', className: 'poly-label', opacity: 0.95 });
+        l.bindPopup(`<b>${field}</b><br/>Crop: ${crop}<br/>Area (ha): ${area}<br/>Confidence: ${conf}`);
+      }
+    }).addTo(map);
+
+    map.fitBounds(layer.getBounds(), { padding: [20, 20] });
+    L.control.layers({ 'Satellite (Esri)': satellite }, { 'Field polygons': layer }, { collapsed: false }).addTo(map);
+  </script>
+</body>
+</html>

@@ -1,63 +1,48 @@
-import agribound
-import os
 import json
-import random
+import logging
+import os
+from pathlib import Path
+
+import agribound
 import ee
+
 from .utils import create_aoi_file
 
-# Initialize GEE if credentials provided
-def init_gee():
-    """Initialize Google Earth Engine"""
-    import os
-    gee_project = os.getenv("GEE_PROJECT_ID", "").strip()
-    
-    print(f"GEE init with project: '{gee_project}'")
-    
-    # Try using project ID - works if EE is enabled for the project
-    if gee_project and gee_project not in ('', 'your-project-id', 'your-gee-project-id'):
-        try:
-            # First try initializing with project
-            ee.Initialize(project=gee_project)
-            print(f"GEE initialized with project: {gee_project}")
-            return True
-        except Exception as e:
-            print(f"GEE init with project failed: {e}")
-            # Try without project name - might use Application Default Credentials
-            try:
-                ee.Initialize()
-                print("GEE initialized (ADC)")
-                return True
-            except Exception as e2:
-                print(f"GEE init failed: {e2}")
-    
-    print("No GEE credentials - using simulated field boundaries")
-    return False
-    
-    if gee_project or gee_key:
-        try:
-            if gee_key and gee_key != '{}':
-                # Write service account key to temp file
-                import json
-                key_data = json.loads(gee_key)
-                key_path = "/tmp/gee_key.json"
-                with open(key_path, 'w') as f:
-                    json.dump(key_data, f)
-                credentials = ee.ServiceAccountCredentials.from_service_account_file(key_path)
-                ee.Initialize(credentials=credentials)
-            elif gee_project:
-                ee.Initialize(project=gee_project)
-            print(f"GEE initialized successfully")
-            return True
-        except Exception as e:
-            print(f"GEE init failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-    print("No GEE credentials found")
-    return False
+log = logging.getLogger("agri_engine.processor")
 
-# Try to initialize GEE on module load
-GEE_INITIALIZED = init_gee()
+_INVALID_PROJECTS = {"", "your-project-id", "your-gee-project-id"}
+_CREDENTIAL_CANDIDATES = (
+    "/app/secrets/credentials.json",
+    "/app/secrets/service-account.json",
+)
+
+
+def _find_credentials_file() -> str | None:
+    for candidate in _CREDENTIAL_CANDIDATES:
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def _initialize_gee(gee_project: str | None, creds_path: str | None) -> None:
+    """Initialize Earth Engine and raise with context if it fails."""
+    if creds_path:
+        log.info("GEE init: using service-account file at %s", creds_path)
+        credentials = ee.ServiceAccountCredentials.from_service_account_file(creds_path)
+        ee.Initialize(credentials=credentials)
+        return
+
+    if gee_project and gee_project.strip() not in _INVALID_PROJECTS:
+        project = gee_project.strip()
+        log.info("GEE init: using project '%s'", project)
+        ee.Initialize(project=project)
+        return
+
+    raise RuntimeError(
+        "GEE configuration missing. Provide GEE_PROJECT_ID or mount a service-account file at "
+        "/app/secrets/credentials.json (or /app/secrets/service-account.json)."
+    )
+
 
 class AgriProcessor:
     def __init__(self, gee_project=None):
@@ -66,139 +51,70 @@ class AgriProcessor:
 
     def process_field(self, lat, lon, boundaries_path=None):
         """
-        Delineate agricultural field boundaries using agribound with GEE.
-        Only uses GEE if properly authenticated, otherwise falls back to simulated.
+        Delineate agricultural field boundaries using GEE + agribound.
+        Fails fast on any error; never returns synthetic polygons.
         """
-        import os
+        if not (-90 <= float(lat) <= 90 and -180 <= float(lon) <= 180):
+            raise ValueError(f"Invalid coordinate range: lat={lat}, lon={lon}")
+
         aoi_path = create_aoi_file(lat, lon)
         out_path = boundaries_path or "/tmp/field_boundaries.geojson"
-        gee_project = self.gee_project or os.getenv("GEE_PROJECT_ID")
-        
-        # Try AGRIBOUND with GEE if credentialed
-        use_gee = False
-        
-        # Check for credentials file first
-        creds_paths = ["/app/secrets/credentials.json", "/app/secrets/service-account.json"]
-        creds_found = None
-        for cp in creds_paths:
-            if os.path.exists(cp):
-                creds_found = cp
-                break
-        
-        if creds_found or (gee_project and gee_project not in ('', 'your-project-id')):
-            try:
-                print(f"Attempting GEE delineation for {lat}, {lon}")
-                
-                # Try initializing if not already done
-                try:
-                    if creds_found:
-                        import ee
-                        credentials = ee.ServiceAccountCredentials.from_service_account_file(creds_found)
-                        ee.Initialize(credentials=credentials)
-                    elif gee_project:
-                        import ee
-                        ee.Initialize(project=gee_project)
-                    print(f"GEE initialized")
-                except Exception as init_err:
-                    print(f"GEE already initialized or: {init_err}")
-                
-                # Now try agribound
-                agribound.delineate(
-                    study_area=aoi_path,
-                    source="sentinel2",
-                    year=2026,
-                    engine="delineate-anything", 
-                    engine_params={"checkpoint": self.sam_path},
-                    gee_project=gee_project,
-                    output_path=out_path
-                )
-                print("GEE/agribound delineation complete!")
-                use_gee = True
-                
-                import geopandas as gpd
-                gdf = gpd.read_file(out_path)
-                return {
-                    "status": "Success",
-                    "bounds_file": out_path,
-                    "field_count": len(gdf),
-                    "bounds_geojson": json.loads(gdf.to_json()),
-                    "source": "gee"
-                }
-            except Exception as e:
-                print(f"GEE agribound failed: {e}")
-                print("Falling back to simulated field boundaries")
-        
-        if not use_gee:
-            # Fallback: generate realistic field polygons (simulated)
-            print("Using SIMULATED field boundaries (GEE not authenticated)")
-            fields_geojson = self._generate_field_polygons(lat, lon)
-            
-            with open(out_path, 'w') as f:
-                json.dump(fields_geojson, f)
-            
+        out_file = Path(out_path)
+        gee_project = (self.gee_project or os.getenv("GEE_PROJECT_ID", "")).strip()
+        creds_found = _find_credentials_file()
+
+        log.info("Field delineation requested for lat=%s lon=%s", lat, lon)
+        log.info("AOI path: %s", aoi_path)
+        log.info("Output path: %s", out_path)
+        log.info("GEE project: %s", gee_project or "<unset>")
+        log.info("Credentials file: %s", creds_found or "<none>")
+        log.info("SAM checkpoint path: %s (exists=%s)", self.sam_path, os.path.exists(self.sam_path))
+
+        # Prevent stale file confusion from previous runs.
+        if out_file.exists():
+            log.info("Removing existing output before delineation: %s", out_path)
+            out_file.unlink()
+
+        try:
+            _initialize_gee(gee_project, creds_found)
+            log.info("GEE initialization successful")
+        except Exception as e:
+            log.exception("GEE initialization failed")
+            raise RuntimeError(f"GEE initialization failed: {e}") from e
+
+        try:
+            log.info("Calling agribound.delineate(...)")
+            agribound.delineate(
+                study_area=aoi_path,
+                source="sentinel2",
+                year=2026,
+                engine="delineate-anything",
+                engine_params={"checkpoint": self.sam_path},
+                gee_project=gee_project or None,
+                output_path=out_path,
+            )
+            log.info("agribound.delineate completed")
+        except Exception as e:
+            log.exception("agribound delineation failed")
+            raise RuntimeError(f"agribound delineation failed: {e}") from e
+
+        if not out_file.exists():
+            raise RuntimeError(f"Delineation completed without creating output file: {out_path}")
+        if out_file.stat().st_size == 0:
+            raise RuntimeError(f"Delineation created an empty output file: {out_path}")
+
+        try:
+            import geopandas as gpd
+
+            gdf = gpd.read_file(out_path)
+            log.info("Loaded output geodataframe with %d features", len(gdf))
             return {
                 "status": "Success",
                 "bounds_file": out_path,
-                "field_count": len(fields_geojson.get("features", [])),
-                "bounds_geojson": fields_geojson,
-                "source": "simulated"
+                "field_count": len(gdf),
+                "bounds_geojson": json.loads(gdf.to_json()),
+                "source": "gee",
             }
-    
-    def _generate_field_polygons(self, lat: float, lon: float, num_fields: int = None) -> dict:
-        """
-        Generate realistic agricultural field polygons.
-        This simulates what agribound's SAM model would detect.
-        """
-        # Use consistent random based on location hash
-        seed = int(lat * 10000 + lon * 10000)
-        random.seed(seed)
-        
-        # Random number of fields (3-8)
-        num_fields = num_fields or random.randint(3, 8)
-        
-        features = []
-        base_lat, base_lon = lat, lon
-        
-        # Generate field polygons spread around the center point
-        for i in range(num_fields):
-            # Random offset from center (roughly 100-500m)
-            offset_lat = (random.random() - 0.5) * 0.004
-            offset_lon = (random.random() - 0.5) * 0.004
-            
-            center_lat = base_lat + offset_lat
-            center_lon = base_lon + offset_lon
-            
-            # Field size varies (roughly 0.5-2 hectares)
-            field_size = 0.002 + random.random() * 0.003
-            
-            # Generate rectangular-ish polygon (common for agricultural fields)
-            points = [
-                [center_lon - field_size, center_lat - field_size * 0.6],
-                [center_lon + field_size, center_lat - field_size * 0.6],
-                [center_lon + field_size, center_lat + field_size * 0.6],
-                [center_lon - field_size, center_lat + field_size * 0.6],
-                [center_lon - field_size, center_lat - field_size * 0.6]
-            ]
-            
-            # Random crop type
-            crops = ["Rice", "Wheat", "Maize", "Potato", "Vegetables", "Pulses"]
-            crop = random.choice(crops)
-            
-            features.append({
-                "type": "Feature",
-                "properties": {
-                    "field_id": f"field_{i+1}",
-                    "crop_type": crop,
-                    "area_ha": round(field_size * field_size * 10000 * 0.8, 2),
-                    "confidence": round(0.7 + random.random() * 0.25, 2)
-                },
-                "geometry": {
-                    "type": "Polygon",
-                    "coordinates": [points]
-                }
-            })
-        
-        return {
-            "type": "FeatureCollection",
-            "features": features
-        }
+        except Exception as e:
+            log.exception("Failed to load delineation output as GeoDataFrame")
+            raise RuntimeError(f"Failed reading delineation output ({out_path}): {e}") from e
