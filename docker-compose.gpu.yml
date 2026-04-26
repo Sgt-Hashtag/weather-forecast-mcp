@@ -1,0 +1,11 @@
+services:
+  agent:
+    environment:
+      - GPU_INFERENCE=true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

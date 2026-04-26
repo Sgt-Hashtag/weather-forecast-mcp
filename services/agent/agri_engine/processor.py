@@ -1,224 +1,269 @@
-import agribound
-import os
 import json
-import random
+import logging
+import os
+import shutil
+from pathlib import Path
+
+import agribound
 import ee
+
 from .utils import create_aoi_file
 
-# Initialize GEE if credentials provided
-def init_gee():
-    """Initialize Google Earth Engine"""
-    import os
-    gee_project = os.getenv("GEE_PROJECT_ID", "").strip()
-    
-    print(f"GEE init with project: '{gee_project}'")
-    
-    # Try using project ID - works if EE is enabled for the project
-    if gee_project and gee_project not in ('', 'your-project-id', 'your-gee-project-id'):
-        try:
-            # First try initializing with project
-            ee.Initialize(project=gee_project)
-            print(f"GEE initialized with project: {gee_project}")
-            return True
-        except Exception as e:
-            print(f"GEE init with project failed: {e}")
-            # Try without project name - might use Application Default Credentials
-            try:
-                ee.Initialize()
-                print("GEE initialized (ADC)")
-                return True
-            except Exception as e2:
-                print(f"GEE init failed: {e2}")
-    
-    print("No GEE credentials - using simulated field boundaries")
-    return False
+log = logging.getLogger("agri_engine.processor")
 
-# Try to initialize GEE on module load
-GEE_INITIALIZED = init_gee()
+_INVALID_PROJECTS = {"", "your-project-id", "your-gee-project-id"}
+_CREDENTIAL_CANDIDATES = (
+    "/app/secrets/credentials.json",
+    "/app/secrets/service-account.json",
+)
+
+
+def _find_credentials_file() -> str | None:
+    for candidate in _CREDENTIAL_CANDIDATES:
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def _initialize_gee(gee_project: str | None, creds_path: str | None) -> None:
+    """Initialize Earth Engine and return credentials (or None) plus resolved project."""
+    if creds_path:
+        with open(creds_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        client_email = data.get("client_email")
+        if not client_email:
+            raise RuntimeError(f"Missing client_email in credentials file: {creds_path}")
+        log.info("GEE init: using service-account file at %s", creds_path)
+        # earthengine-api compatible path for this environment
+        credentials = ee.ServiceAccountCredentials(client_email, creds_path)
+        resolved_project = gee_project or data.get("project_id")
+        ee.Initialize(credentials=credentials, project=(resolved_project or None))
+        return credentials, resolved_project
+
+    if gee_project and gee_project.strip() not in _INVALID_PROJECTS:
+        project = gee_project.strip()
+        log.info("GEE init: using ambient credentials with project '%s'", project)
+        ee.Initialize(project=project)
+        return None, project
+
+    raise RuntimeError(
+        "GEE configuration missing. Provide /app/secrets/credentials.json "
+        "(or /app/secrets/service-account.json)."
+    )
+
+
+def _patch_agribound_setup_gee(credentials, gee_project: str | None) -> None:
+    """
+    Force agribound internals to reuse already-initialized EE credentials.
+
+    Some agribound versions call ee.Authenticate() internally when setup_gee fails.
+    This patch avoids that path (which requires gcloud in container).
+    """
+
+    def _setup_gee_override(project=None):
+        ee.Initialize(credentials=credentials, project=(project or gee_project or None))
+
+    patched = 0
+    try:
+        import agribound.auth as ag_auth
+
+        ag_auth.setup_gee = _setup_gee_override
+        patched += 1
+    except Exception as e:
+        log.warning("Could not patch agribound.auth.setup_gee: %s", e)
+
+    try:
+        import agribound.composites.gee as ag_gee
+
+        ag_gee.setup_gee = _setup_gee_override
+        patched += 1
+    except Exception as e:
+        log.warning("Could not patch agribound.composites.gee.setup_gee: %s", e)
+
+    if patched:
+        log.info("Patched agribound setup_gee in %d module(s)", patched)
+    else:
+        log.warning("No agribound setup_gee patch points found")
+
+
+_COMPOSITE_SRC = Path("/tmp/.agribound_cache/sentinel2_2026_composite.tif")
+_PATCHES_ROOT = Path("/tmp/patches")
+
+
+def _save_composite_snapshot(lat, lon) -> None:
+    import numpy as np
+    import rasterio
+
+    if not _COMPOSITE_SRC.exists():
+        log.warning("Composite not found at %s; skipping snapshot", _COMPOSITE_SRC)
+        return
+    dest_dir = _PATCHES_ROOT / f"{float(lat):.6f}_{float(lon):.6f}"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(_COMPOSITE_SRC, dest_dir / "sentinel2_composite.tif")
+    with rasterio.open(_COMPOSITE_SRC) as src:
+        arr = src.read()
+    np.save(dest_dir / "sentinel2_composite.npy", arr)
+    log.info("Composite snapshot saved to %s (shape=%s)", dest_dir, arr.shape)
+
+
+def _resolve_device() -> str:
+    val = os.getenv("GPU_INFERENCE", "false").strip().lower()
+    return "auto" if val in ("1", "true", "yes") else "cpu"
+
 
 class AgriProcessor:
     def __init__(self, gee_project=None):
         self.gee_project = gee_project or os.getenv("GEE_PROJECT_ID")
         self.sam_path = os.getenv("SAM_CHECKPOINT", "/app/models/sam_vit_h_4b8939.pth")
+        self.device = _resolve_device()
+        log.info("Inference device: %s (GPU_INFERENCE=%s)", self.device, os.getenv("GPU_INFERENCE", "false"))
 
     def process_field(self, lat, lon, boundaries_path=None):
         """
-        Delineate agricultural field boundaries using agribound with GEE.
-        Then classify crops using FTW (Field of the World).
-        Only uses GEE if properly authenticated, otherwise falls back to simulated.
+        Delineate agricultural field boundaries using GEE + agribound.
+        Fails fast on any error; never returns synthetic polygons.
         """
-        import os
+        if not (-90 <= float(lat) <= 90 and -180 <= float(lon) <= 180):
+            raise ValueError(f"Invalid coordinate range: lat={lat}, lon={lon}")
+
         aoi_path = create_aoi_file(lat, lon)
         boundaries_out = boundaries_path or "/tmp/field_boundaries.geojson"
         classified_out = "/tmp/classified_fields.geojson"
-        gee_project = self.gee_project or os.getenv("GEE_PROJECT_ID")
-        
-        # Try AGRIBOUND with GEE if credentialed
-        use_gee = False
-        
-        # Check for credentials file first
-        creds_paths = ["/app/secrets/credentials.json", "/app/secrets/service-account.json"]
-        creds_found = None
-        for cp in creds_paths:
-            if os.path.exists(cp):
-                creds_found = cp
-                break
-        
-        if creds_found or (gee_project and gee_project not in ('', 'your-project-id')):
-            try:
-                print(f"Attempting GEE delineation for {lat}, {lon}")
-                
-                # Try initializing if not already done
-                try:
-                    import ee
-                    if creds_found:
-                        credentials = ee.ServiceAccountCredentials.from_service_account_file(creds_found)
-                        ee.Initialize(credentials=credentials)
-                    elif gee_project:
-                        ee.Initialize(project=gee_project)
-                    print(f"GEE initialized")
-                except Exception as init_err:
-                    print(f"GEE already initialized or: {init_err}")
-                
-                # Step 1: Delineate field boundaries using delineate-anything
-                agribound.delineate(
-                    study_area=aoi_path,
-                    source="sentinel2",
-                    year=2026,
-                    engine="delineate-anything", 
-                    engine_params={"checkpoint": self.sam_path},
-                    gee_project=gee_project,
-                    output_path=boundaries_out
+        bounds_file = Path(boundaries_out)
+        class_file = Path(classified_out)
+        gee_project = (self.gee_project or os.getenv("GEE_PROJECT_ID", "")).strip()
+        creds_found = _find_credentials_file()
+
+        log.info("Field delineation requested for lat=%s lon=%s", lat, lon)
+        log.info("AOI path: %s", aoi_path)
+        log.info("Boundaries output path: %s", boundaries_out)
+        log.info("Classification output path: %s", classified_out)
+        log.info("GEE project: %s", gee_project or "<unset>")
+        log.info("Credentials file: %s", creds_found or "<none>")
+        log.info("SAM checkpoint path: %s (exists=%s)", self.sam_path, os.path.exists(self.sam_path))
+
+        for f in (bounds_file, class_file):
+            if f.exists():
+                log.info("Removing existing output before run: %s", f)
+                f.unlink()
+
+        agribound_cache = Path("/tmp/.agribound_cache")
+        if agribound_cache.exists():
+            shutil.rmtree(agribound_cache)
+            log.info("Cleared agribound cache for fresh run")
+
+        try:
+            credentials, resolved_project = _initialize_gee(gee_project, creds_found)
+            gee_project = (resolved_project or gee_project or "").strip()
+            if credentials is not None:
+                _patch_agribound_setup_gee(credentials, gee_project)
+            log.info("GEE initialization successful")
+        except Exception as e:
+            log.exception("GEE initialization failed")
+            raise RuntimeError(f"GEE initialization failed: {e}") from e
+
+        try:
+            log.info("Step 1/2: agribound.delineate engine=delineate-anything")
+            agribound.delineate(
+                study_area=aoi_path,
+                source="sentinel2",
+                year=2026,
+                engine="delineate-anything",
+                engine_params={},
+                n_workers=0,
+                device=self.device,
+                gee_project=gee_project or None,
+                output_path=boundaries_out,
+            )
+            log.info("Step 1/2 completed with engine=delineate-anything")
+            _save_composite_snapshot(lat, lon)
+        except Exception as e:
+            msg = str(e)
+            needs_ftw_dev = "ftw-tools dev version is required" in msg
+            if needs_ftw_dev:
+                log.warning(
+                    "delineate-anything unavailable (%s). Retrying with engine=samgeo.",
+                    msg,
                 )
-                print("Step 1: Field boundaries delineated!")
-                use_gee = True
-                
-                # Step 2: Classify crops using FTW
                 try:
-                    print("Step 2: Running FTW crop classification...")
                     agribound.delineate(
-                        study_area=boundaries_out,
+                        study_area=aoi_path,
                         source="sentinel2",
                         year=2026,
-                        engine="ftw",
-                        gee_project=gee_project,
-                        output_path=classified_out
+                        engine="samgeo",
+                        engine_params={"checkpoint": self.sam_path},
+                        n_workers=0,
+                        device=self.device,
+                        gee_project=gee_project or None,
+                        output_path=boundaries_out,
                     )
-                    print("Step 2: Crop classification complete!")
-                    
-                    # Use the classified results
-                    import geopandas as gpd
+                    log.info("Step 1/2 completed with engine=samgeo fallback")
+                    _save_composite_snapshot(lat, lon)
+                except Exception as samgeo_err:
+                    log.exception("Boundary delineation failed with samgeo fallback")
+                    raise RuntimeError(
+                        f"Boundary delineation failed (delineate-anything unavailable; "
+                        f"samgeo fallback also failed): {samgeo_err}"
+                    ) from samgeo_err
+            else:
+                log.exception("Boundary delineation failed")
+                raise RuntimeError(f"Boundary delineation failed: {e}") from e
+
+        if not bounds_file.exists():
+            raise RuntimeError(f"Delineation completed without output file: {boundaries_out}")
+        if bounds_file.stat().st_size == 0:
+            raise RuntimeError(f"Delineation created empty output file: {boundaries_out}")
+
+        try:
+            import geopandas as gpd
+
+            try:
+                log.info("Step 2/2: agribound.delineate engine=ftw")
+                agribound.delineate(
+                    study_area=boundaries_out,
+                    source="sentinel2",
+                    year=2026,
+                    engine="ftw",
+                    n_workers=0,
+                    device=self.device,
+                    gee_project=gee_project or None,
+                    output_path=classified_out,
+                )
+                if class_file.exists() and class_file.stat().st_size > 0:
                     gdf = gpd.read_file(classified_out)
-                    
-                    # Extract crop types from classification
+                    log.info("Loaded classified output with %d features", len(gdf))
                     crop_info = []
-                    for idx, row in gdf.iterrows():
+                    for _, row in gdf.iterrows():
                         props = row.to_dict()
-                        crop_type = props.get('crop_type', props.get('predicted_crop', 'Unknown'))
-                        confidence = props.get('confidence', props.get('score', 0.8))
-                        crop_info.append({
-                            'crop': crop_type,
-                            'confidence': confidence
-                        })
-                    
+                        crop_info.append(
+                            {
+                                "crop": props.get("crop_type", props.get("predicted_crop", "Unknown")),
+                                "confidence": props.get("confidence", props.get("score", 0.8)),
+                            }
+                        )
                     return {
                         "status": "Success",
                         "bounds_file": boundaries_out,
                         "field_count": len(gdf),
                         "bounds_geojson": json.loads(gdf.to_json()),
                         "source": "gee",
-                        "crop_classification": crop_info
+                        "crop_classification": crop_info,
                     }
-                except Exception as ftw_err:
-                    print(f"FTW classification failed: {ftw_err}")
-                    # Still return the boundary results even if FTW fails
-                    import geopandas as gpd
-                    gdf = gpd.read_file(boundaries_out)
-                    return {
-                        "status": "Success",
-                        "bounds_file": boundaries_out,
-                        "field_count": len(gdf),
-                        "bounds_geojson": json.loads(gdf.to_json()),
-                        "source": "gee",
-                        "crop_classification": None,
-                        "note": "FTW classification unavailable"
-                    }
-                    
-            except Exception as e:
-                print(f"GEE agribound failed: {e}")
-                print("Falling back to simulated field boundaries")
-        
-        if not use_gee:
-            # Fallback: generate realistic field polygons (simulated)
-            print("Using SIMULATED field boundaries (GEE not authenticated)")
-            fields_geojson = self._generate_field_polygons(lat, lon)
-            
-            with open(boundaries_out, 'w') as f:
-                json.dump(fields_geojson, f)
-            
+                log.warning("FTW output missing/empty; returning boundary-only output")
+            except Exception as ftw_err:
+                log.warning("FTW classification failed; returning boundary-only output: %s", ftw_err)
+
+            gdf = gpd.read_file(boundaries_out)
+            log.info("Loaded boundary output with %d features", len(gdf))
             return {
                 "status": "Success",
                 "bounds_file": boundaries_out,
-                "field_count": len(fields_geojson.get("features", [])),
-                "bounds_geojson": fields_geojson,
-                "source": "simulated"
+                "field_count": len(gdf),
+                "bounds_geojson": json.loads(gdf.to_json()),
+                "source": "gee",
+                "crop_classification": None,
+                "note": "FTW classification unavailable",
             }
-    
-    def _generate_field_polygons(self, lat: float, lon: float, num_fields: int = None) -> dict:
-        """
-        Generate realistic agricultural field polygons.
-        This simulates what agribound's SAM model would detect.
-        """
-        # Use consistent random based on location hash
-        seed = int(lat * 10000 + lon * 10000)
-        random.seed(seed)
-        
-        # Random number of fields (3-8)
-        num_fields = num_fields or random.randint(3, 8)
-        
-        features = []
-        base_lat, base_lon = lat, lon
-        
-        # Generate field polygons spread around the center point
-        for i in range(num_fields):
-            # Random offset from center (roughly 100-500m)
-            offset_lat = (random.random() - 0.5) * 0.004
-            offset_lon = (random.random() - 0.5) * 0.004
-            
-            center_lat = base_lat + offset_lat
-            center_lon = base_lon + offset_lon
-            
-            # Field size varies (roughly 0.5-2 hectares)
-            field_size = 0.002 + random.random() * 0.003
-            
-            # Generate rectangular-ish polygon (common for agricultural fields)
-            points = [
-                [center_lon - field_size, center_lat - field_size * 0.6],
-                [center_lon + field_size, center_lat - field_size * 0.6],
-                [center_lon + field_size, center_lat + field_size * 0.6],
-                [center_lon - field_size, center_lat + field_size * 0.6],
-                [center_lon - field_size, center_lat - field_size * 0.6]
-            ]
-            
-            # Random crop type
-            crops = ["Rice", "Wheat", "Maize", "Potato", "Vegetables", "Pulses"]
-            crop = random.choice(crops)
-            
-            features.append({
-                "type": "Feature",
-                "properties": {
-                    "field_id": f"field_{i+1}",
-                    "crop_type": crop,
-                    "area_ha": round(field_size * field_size * 10000 * 0.8, 2),
-                    "confidence": round(0.7 + random.random() * 0.25, 2)
-                },
-                "geometry": {
-                    "type": "Polygon",
-                    "coordinates": [points]
-                }
-            })
-        
-        return {
-            "type": "FeatureCollection",
-            "features": features
-        }
+        except Exception as e:
+            log.exception("Failed reading output files")
+            raise RuntimeError(f"Failed reading agribound output: {e}") from e

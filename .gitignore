@@ -12,3 +12,8 @@ build/
 *.egg-info/
 .eggs/
 *.pdf
+credentials.json
+secrets/*.json
+results/*
+patches/
+.codex

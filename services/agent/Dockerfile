@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     curl \
     gnupg \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js for npx (Mapbox MCP)
@@ -21,10 +22,14 @@ ENV C_INCLUDE_PATH=/usr/include/gdal
 
 WORKDIR /app
 
+# GPU_INFERENCE=true  → pass --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
+# GPU_INFERENCE=false → default CPU wheels (no CUDA required)
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+
 # 1. Install Heavy AI Dependencies (Cache this once)
 COPY requirements-core.txt .
 RUN pip install --no-cache-dir --prefer-binary \
-    --index-url https://download.pytorch.org/whl/cpu \
+    --index-url ${TORCH_INDEX_URL} \
     -r requirements-core.txt
 
 # 2. Install Geospatial Dependencies (Cache this once)
@@ -34,6 +39,13 @@ RUN pip install --no-cache-dir --prefer-binary -r requirements-geo.txt
 # 3. Install App Dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Install ftw-tools (required by delineate-anything engine for Sentinel-2)
+RUN pip install --no-cache-dir git+https://github.com/fieldsoftheworld/ftw-baselines.git
+
+# Force headless OpenCV — ultralytics pulls in opencv-python (GUI) which needs
+# libxcb display libs not present in this container. Replace with headless.
+RUN pip install --no-cache-dir --force-reinstall opencv-python-headless
 
 # Copy model checkpoints
 RUN apt-get update && apt-get install -y wget && rm -rf /var/lib/apt/lists/*

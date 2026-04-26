@@ -187,6 +187,163 @@ python -c "from mcp_client import MCPClientManager; print(MCPClientManager()._ex
 
 
 
-# Addendum
+---
 
-https://github.com/montimaj/agribound#google-earth-engine-authentication
+## Field Boundary Delineation (agribound)
+
+Agricultural field boundary delineation is implemented as an optional pipeline step powered by [agribound](https://github.com/montimaj/agribound) and Google Earth Engine.
+
+### How it works
+
+```
+User query with coordinates
+        ↓
+GEE downloads Sentinel-2 composite (full-year median, 10m, cloud-masked)
+        ↓
+Step 1 — DelineateAnything (YOLO instance segmentation) → field polygons GeoJSON
+        ↓
+Step 2 — FTW / Fields of the World (semantic segmentation) → refines boundaries
+        ↓
+LULC filter — Google Dynamic World crop probability > 0.3 (removes non-agricultural detections)
+        ↓
+GeoJSON output + map overlay
+```
+
+**Important:** Both Step 1 and Step 2 are field *boundary* detection only — no crop type classification is performed. The `crop_type` field in output will always be `"Unknown"`.
+
+### Additional Prerequisites
+
+- **GEE Project ID**: A registered Google Earth Engine project
+- **Service account credentials**: JSON key file with GEE access
+- **NVIDIA GPU** (recommended): RTX-class GPU with CUDA 12.x drivers. CPU fallback works but is slow.
+
+### Credentials Setup
+
+Place your GEE service account JSON at either:
+```
+secrets/credentials.json
+secrets/service-account.json
+```
+
+The `secrets/` directory is mounted read-only into the container at `/app/secrets/`.
+
+### Environment Variables
+
+Add to your `.env`:
+```
+GEE_PROJECT_ID=your-gee-project-id
+```
+
+### Triggering Field Delineation
+
+The agent detects delineation intent from natural language. Always include explicit coordinates:
+
+```
+"Delineate field boundaries at latitude 30.9 longitude 75.5"
+"Show me farm boundaries at lat 23.5 lon 90.3"
+"My land at latitude 28.6 longitude 77.2"
+```
+
+Using the provided script:
+```bash
+# Edit the coordinates inside the script, then run:
+bash scripts/query_field_boundaries.sh
+# Output saved to results/result.json
+```
+
+Or directly with curl:
+```bash
+curl -X POST http://localhost:8000/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "Delineate field boundaries at latitude 30.9 longitude 75.5"}'
+```
+
+**Always provide explicit coordinates.** Without them, the agent geocodes the location name and may return 0 results if the area has low crop probability in Google Dynamic World (threshold: 0.3).
+
+### GPU vs CPU Mode
+
+GPU inference is opt-in. The base `docker-compose.yml` runs entirely on CPU and works on any machine. A separate `docker-compose.gpu.yml` override activates GPU mode.
+
+> **Why two files?** Docker Compose does not support conditional YAML blocks. The `deploy.resources.reservations.devices` section that reserves a GPU device hard-fails on machines without the NVIDIA Container Toolkit — regardless of any env var. The override file pattern is the standard Docker solution for this.
+
+#### CPU mode (default, no GPU required)
+
+```bash
+docker compose up --build -d
+```
+
+PyTorch CPU wheels are installed by default (~500 MB). Inference runs on CPU — slower but works everywhere.
+
+#### GPU mode
+
+**Requirements:**
+- NVIDIA GPU with CUDA 12.x drivers
+- [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installed on the host
+
+**Step 1 — Build with CUDA PyTorch wheels:**
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
+  build --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
+```
+
+`cu128` targets CUDA 12.8. For older drivers use `cu121` or `cu118`. CPU wheels are ~500 MB; CUDA wheels are ~2.5 GB.
+
+**Step 2 — Start with GPU override:**
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+```
+
+This merges `docker-compose.gpu.yml` on top of the base file, which:
+- Sets `GPU_INFERENCE=true` → agribound uses `device="auto"` (resolves to CUDA)
+- Reserves one NVIDIA GPU for the container
+
+**Verify GPU is active:**
+```bash
+docker exec weather-forecast-mcp-agent-1 python -c "import torch; print(torch.cuda.is_available())"
+# Expected: True
+```
+
+Check agent logs to confirm the device at startup:
+```bash
+docker compose logs agent | grep "Inference device"
+# Expected: Inference device: auto (GPU_INFERENCE=true)
+```
+
+### Known Constraints
+
+| Constraint | Detail |
+|---|---|
+| AOI size | 0.02° buffer (~2.2 km) around the point — minimum for FTW's 256px patch requirement |
+| LULC filter | Polygons are dropped if Google Dynamic World crop probability < 0.3 — urban and forest areas will return 0 fields |
+| Cache | Sentinel-2 composite is cached at `/tmp/.agribound_cache/`; cleared before each run to avoid stale results |
+| Workers | `n_workers=0` is required — CUDA context cannot be inherited by forked DataLoader processes in Docker |
+| Crop classification | Not implemented — output `crop_type` is always `"Unknown"` |
+
+### Extracting Raw Satellite Composites
+
+After a successful delineation, the Sentinel-2 composite is saved inside the container at:
+```
+/tmp/patches/{lat}_{lon}/sentinel2_composite.tif   ← GeoTIFF with CRS + transform
+/tmp/patches/{lat}_{lon}/sentinel2_composite.npy   ← numpy array, shape (12, H, W), float32
+```
+
+Copy to host:
+```bash
+./get_patches.sh              # copies to ./patches/
+./get_patches.sh ~/my_patches # custom output dir
+```
+
+Load in Python:
+```python
+import rasterio, numpy as np
+
+# With spatial metadata (CRS, pixel size, bounding box)
+with rasterio.open("patches/30.900000_75.500000/sentinel2_composite.tif") as src:
+    arr = src.read()        # shape: (12, H, W) — S2 bands B1..B12
+    transform = src.transform
+
+# Plain numpy
+arr = np.load("patches/30.900000_75.500000/sentinel2_composite.npy")
+```
+
+Sentinel-2 bands (in order): B1, B2, B3, B4, B5, B6, B7, B8, B8A, B9, B11, B12

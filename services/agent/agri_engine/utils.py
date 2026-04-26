@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-def create_aoi_file(lat, lon, output_path: str = "temp_aoi.geojson", buffer=0.01):
+def create_aoi_file(lat, lon, output_path: str = "temp_aoi.geojson", buffer=0.02):
     """
     Creates a small GeoJSON file around a coordinate point, 
     which agribound.delineate() requires as a study_area.

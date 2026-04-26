@@ -15,6 +15,14 @@ class WeatherIntent(BaseModel):
     location: str = Field(
         description="The specific city or region name in Bangladesh. Default to 'Dhaka' if unclear."
     )
+    lat: float | None = Field(
+        default=None,
+        description="Latitude if the user explicitly provided numeric coordinates (e.g. 'latitude 28.6'). Null if not provided."
+    )
+    lon: float | None = Field(
+        default=None,
+        description="Longitude if the user explicitly provided numeric coordinates (e.g. 'longitude 77.2'). Null if not provided."
+    )
     user_context: Literal["FARMER", "CITIZEN"] = Field(
         description="Classify as FARMER if query mentions crops, irrigation, agriculture, harvest, etc. Otherwise CITIZEN."
     )
@@ -74,10 +82,11 @@ class WeatherAgent:
         directly into a Pydantic model. 
         """
         prompt = f"""
-        Analyze this weather query: "{user_query}"
-        
+        Analyze this query: "{user_query}"
+
         Extract the intent into JSON matching the schema.
-        - Detect the location (e.g. "Pabna").
+        - Detect the location name (e.g. "Pabna"). If only coordinates are given, use a descriptive name like "Custom Location".
+        - If the query contains explicit numeric latitude/longitude values, extract them into lat and lon fields. Otherwise set both to null.
         - Detect if the user is a FARMER or CITIZEN based on intent.
         - Determine the forecast duration (e.g. "next week" = 7 days, "tomorrow" = 1 day).
         - Determine task type: FORECAST, FIELD_DELINEATION, or BOTH based on whether user mentions field boundaries, land delineation, or farm mapping.
@@ -122,12 +131,20 @@ class WeatherAgent:
         print(f"   - Days: {forecast_days}")
         print(f"   - Task: {task_type}")
         
-        # Geocode 
-        location_data = await self.mcp.geocode_location(location_name)
-        if not location_data:
-            raise ValueError(f"Could not geocode location: {location_name}")
-        
-        print(f"Geocoded: {location_data['area_name']} ({location_data['latitude']:.4f}, {location_data['longitude']:.4f})")
+        # Use explicit coordinates if provided, otherwise geocode
+        if intent.lat is not None and intent.lon is not None:
+            location_data = {
+                "latitude": intent.lat,
+                "longitude": intent.lon,
+                "area_name": location_name,
+                "district": location_name,
+            }
+            print(f"Using provided coordinates: ({intent.lat}, {intent.lon})")
+        else:
+            location_data = await self.mcp.geocode_location(location_name)
+            if not location_data:
+                raise ValueError(f"Could not geocode location: {location_name}")
+            print(f"Geocoded: {location_data['area_name']} ({location_data['latitude']:.4f}, {location_data['longitude']:.4f})")
         district_name = location_data.get("district")
         if not district_name:
             district_name = location_data.get("area_name", location_name)
