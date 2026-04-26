@@ -69,16 +69,32 @@ def get_latest_ndvi(con, farm_geojson):
     good_pixels = (scl == 4) | (scl == 5) | (scl == 6) | (scl == 11) | (scl == 12)
     ndvi_masked = ndvi.mask(good_pixels)
     
-    # 4. FIX: Reduce time dimension to a single image (Median)
-    # This prevents the MultipleAssetException by turning 30 days of data into 1 file.
+    # 4. Reduce time dimension (Median)
     ndvi_reduced = ndvi_masked.reduce_dimension(dimension="t", reducer="median")
 
-    # 5. Stats (Using original ndvi_masked for statistics)
+    # 5. Stats
     stats_json = ndvi_masked.aggregate_spatial(geometries=farm_geojson, reducer="mean").execute()
     df = pd.json_normalize(stats_json)
-    df.to_csv("ndvi_stats.csv", index=False)
     
-    # 6. Execute Raster Job (Using reduced image)
+    # --- DEEP EXTRACTION LOGIC ---
+    possible_cols = ['mean', 'value', 'result', '0']
+    data_col = next((col for col in possible_cols if col in df.columns), df.columns[-1])
+    raw_val = df[data_col].dropna().iloc[-1]
+
+    def deep_get_float(val):
+        """Recursively unwraps lists until a number is found."""
+        if isinstance(val, (int, float)):
+            return float(val)
+        if isinstance(val, (list, tuple)):
+            # Drill into the first element (or last, depending on structure)
+            return deep_get_float(val[0]) 
+        return float(val)
+
+    ndvi_value = deep_get_float(raw_val)
+    print(f"Successfully extracted NDVI value: {ndvi_value}")
+    # -----------------------
+    
+    # 6. Execute Raster Job
     print("Starting raster map job...")
     raster_job = ndvi_reduced.save_result(format="GTiff")
     job_raster = raster_job.create_job(title="Dhaka NDVI Map")
@@ -88,7 +104,7 @@ def get_latest_ndvi(con, farm_geojson):
     results = job_raster.get_results()
     results.download_file("ndvi_map.tif")
     
-    return float(df["mean"].dropna().iloc[-1]), "ndvi_map.tif"
+    return ndvi_value, "ndvi_map.tif"
 
 def create_pdf(ndvi_value, status, deficit, zone_map_path):
     print("Generating PDF report...")
@@ -228,7 +244,8 @@ def run_pipeline_visual():
         print("Script already run today. Using existing files...")
         if os.path.exists("ndvi_stats.csv") and os.path.exists("ndvi_map.tif"):
             df = pd.read_csv("ndvi_stats.csv")
-            valid_means = df["mean"].dropna()
+            target_column = "value" if "value" in df.columns else "mean"
+            valid_means = df[target_column].dropna()
             if not valid_means.empty:
                 ndvi_value = float(valid_means.iloc[-1])
                 classify_and_visualize(ndvi_value, "ndvi_map.tif")
