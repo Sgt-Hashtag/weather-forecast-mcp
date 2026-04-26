@@ -86,25 +86,6 @@ def _patch_agribound_setup_gee(credentials, gee_project: str | None) -> None:
         log.warning("No agribound setup_gee patch points found")
 
 
-_COMPOSITE_SRC = Path("/tmp/.agribound_cache/sentinel2_2026_composite.tif")
-_PATCHES_ROOT = Path("/tmp/patches")
-
-
-def _save_composite_snapshot(lat, lon) -> None:
-    import numpy as np
-    import rasterio
-
-    if not _COMPOSITE_SRC.exists():
-        log.warning("Composite not found at %s; skipping snapshot", _COMPOSITE_SRC)
-        return
-    dest_dir = _PATCHES_ROOT / f"{float(lat):.6f}_{float(lon):.6f}"
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(_COMPOSITE_SRC, dest_dir / "sentinel2_composite.tif")
-    with rasterio.open(_COMPOSITE_SRC) as src:
-        arr = src.read()
-    np.save(dest_dir / "sentinel2_composite.npy", arr)
-    log.info("Composite snapshot saved to %s (shape=%s)", dest_dir, arr.shape)
-
 
 def _resolve_device() -> str:
     val = os.getenv("GPU_INFERENCE", "false").strip().lower()
@@ -176,7 +157,6 @@ class AgriProcessor:
                 output_path=boundaries_out,
             )
             log.info("Step 1/2 completed with engine=delineate-anything")
-            _save_composite_snapshot(lat, lon)
         except Exception as e:
             msg = str(e)
             needs_ftw_dev = "ftw-tools dev version is required" in msg
@@ -198,7 +178,6 @@ class AgriProcessor:
                         output_path=boundaries_out,
                     )
                     log.info("Step 1/2 completed with engine=samgeo fallback")
-                    _save_composite_snapshot(lat, lon)
                 except Exception as samgeo_err:
                     log.exception("Boundary delineation failed with samgeo fallback")
                     raise RuntimeError(
