@@ -33,14 +33,15 @@ def connect_openeo():
 def get_prithvi_stacked_tif(con, farm_geojson):
     """
     Downloads 3 monthly composites (6 bands each) and stacks them into a single 18-band GeoTIFF.
+    Optimized for size (uint16 + ZSTD compression + Nodata handling).
     """
     print("Fetching Prithvi-compatible data (3 months, 6 bands)...")
     
-    # 1. Date Range: Last 90 days to ensure 3 full months
+    # 1. Date Range
     end_date = datetime.date.today()
     start_date = end_date - timedelta(days=90)
     
-    # 2. Load Collection with SCL for masking
+    # 2. Load Collection
     s2 = con.load_collection(
         "SENTINEL2_L2A",
         spatial_extent=farm_geojson,
@@ -49,18 +50,16 @@ def get_prithvi_stacked_tif(con, farm_geojson):
         max_cloud_cover=50
     )
     
-    # 3. Cloud Masking using SCL
+    # 3. Cloud Masking
     scl = s2.band("SCL")
-    # Keep Vegetation, Non-Veg, Water, Snow, Shadow. Mask Clouds/Haze.
     mask = (scl == 4) | (scl == 5) | (scl == 6) | (scl == 11) | (scl == 12)
     s2_clean = s2.mask(mask)
     
-    # 4. Filter Bands: Keep ONLY the 6 spectral bands for Prithvi
-    # This removes SCL and ensures exactly 6 bands per file
+    # 4. Filter Bands (Remove SCL)
     prithvi_bands = ["B02", "B03", "B04", "B08", "B11", "B12"]
     s2_spectral = s2_clean.filter_bands(prithvi_bands)
     
-    # 5. Aggregate Temporal: Monthly Medians
+    # 5. Aggregate Temporal
     print("Creating monthly composites...")
     s2_monthly = s2_spectral.aggregate_temporal_period(
         period="month", 
@@ -74,50 +73,62 @@ def get_prithvi_stacked_tif(con, farm_geojson):
     
     batch_job.start_and_wait()
     
-    # Download all assets to a temp folder
     download_dir = "temp_prithvi_data"
     os.makedirs(download_dir, exist_ok=True)
     batch_job.get_results().download_files(download_dir)
     
-    # 7. Stack Locally
+    # 7. Stack Locally with MAXIMUM Optimization
     tif_files = sorted(glob.glob(os.path.join(download_dir, "*.tif")))
     
     if not tif_files:
         raise FileNotFoundError("No TIFF files downloaded.")
         
-    # Prithvi needs exactly 3 time steps. 
-    # If we have 4 months (e.g., Jan, Feb, Mar, Apr), we take the LATEST 3.
     if len(tif_files) > 3:
-        print(f"Found {len(tif_files)} months. Selecting the latest 3 for Prithvi...")
-        tif_files = tif_files[-3:] # Take last 3 files (chronologically sorted)
+        print(f"Found {len(tif_files)} months. Selecting the latest 3...")
+        tif_files = tif_files[-3:]
     elif len(tif_files) < 3:
-        raise ValueError(f"Only found {len(tif_files)} months. Need at least 3 for Prithvi.")
+        raise ValueError(f"Only found {len(tif_files)} months. Need 3.")
         
-    print(f"Stacking {len(tif_files)} temporal files into 18-band TIFF...")
+    print(f"Stacking {len(tif_files)} files into optimized 18-band TIFF...")
     
-    # Read profile from first file
+    # Define optimal profile manually to override source settings
+    opt_profile = {
+        'driver': 'GTiff',
+        'dtype': rasterio.uint16,
+        'count': 18,
+        'compress': 'zstd',      # Better compression than LZW for this data
+        'predictor': 2,          # Horizontal differencing (helps with uint16)
+        'tiled': True,           # Essential for large rasters
+        'blockxsize': 256,
+        'blockysize': 256,
+        'nodata': 0,             # Explicitly define 0 as NoData
+        'interleave': 'band'     # Standard for multi-band
+    }
+    
+    # Get dimensions from first file
     with rasterio.open(tif_files[0]) as src:
-        profile = src.profile
-        # Verify we have 6 bands per file
-        if src.count != 6:
-            raise ValueError(f"Expected 6 bands per file, got {src.count}. Check band selection.")
-            
-        # Update profile for 18 bands (3 files * 6 bands)
-        profile.update(count=18, dtype=rasterio.float32)
-        
-    # Create the stacked file
-    with rasterio.open("prithvi_input_stacked.tif", "w", **profile) as dst:
+        opt_profile['height'] = src.height
+        opt_profile['width'] = src.width
+        opt_profile['crs'] = src.crs
+        opt_profile['transform'] = src.transform
+
+    with rasterio.open("prithvi_input_stacked.tif", "w", **opt_profile) as dst:
         for idx, tif_path in enumerate(tif_files):
             with rasterio.open(tif_path) as src:
-                # Read all 6 bands
-                data = src.read().astype(rasterio.float32)
-                # Write to destination at correct index range
-                # indexes are 1-based in rasterio.write
+                # Read as uint16
+                data = src.read().astype(rasterio.uint16)
+                
+                # Optional: Set background/clouds to 0 if they aren't already
+                # This helps compression significantly
+                # data[data == src.nodata] = 0 
+                
                 start_idx = idx * 6 + 1
                 end_idx = start_idx + 6
                 dst.write(data, indexes=range(start_idx, end_idx))
     
-    print("✅ Stacked TIFF created: prithvi_input_stacked.tif")
+    # Check final size
+    final_size_mb = os.path.getsize("prithvi_input_stacked.tif") / (1024 * 1024)
+    print(f"✅ Stacked TIFF created: prithvi_input_stacked.tif ({final_size_mb:.2f} MB)")
     return "prithvi_input_stacked.tif"
 
 def extract_ndvi_from_stack(input_tif, output_ndvi_tif="ndvi_map.tif"):
