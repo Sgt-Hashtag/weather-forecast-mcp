@@ -11,17 +11,39 @@ from pathlib import Path
 import traceback
 
 # ====================== CONFIG ======================
+BASE_DIR = Path(__file__).resolve().parent
 FARM_GEOJSON = {  
     "type": "Polygon",
     "coordinates": [
         [
-            [90.35, 23.75], [90.45, 23.75], 
-            [90.45, 23.85], [90.35, 23.85], 
-            [90.35, 23.75]
+            [90.3785, 23.7795],
+            [90.4015, 23.7795],
+            [90.4015, 23.8005],
+            [90.3785, 23.8005],
+            [90.3785, 23.7795]
         ]
     ]
 }
-LAST_RUN_FILE = "last_processed.txt"
+LAST_RUN_FILE = BASE_DIR / "last_processed.txt"
+RAW_STACK_TIF = BASE_DIR / "prithvi_input_stacked.tif"
+NORMALIZED_TIF = BASE_DIR / "prithvi_ready.tif"
+NDVI_TIF = BASE_DIR / "ndvi_map.tif"
+VISUALIZATION_PNG = BASE_DIR / "farm_visualization.png"
+RGB_PREVIEW_PNG = BASE_DIR / "prithvi_rgb_preview.png"
+TEMP_DOWNLOAD_DIR = BASE_DIR / "temp_prithvi_data"
+CACHE_VERSION = "scl-mask-v2"
+
+# The Hugging Face demo expects raw reflectance/DN-like values scaled around
+# 0-10000. Do not upload the normalized float TIFF to the Space.
+CREATE_NORMALIZED_LOCAL_COPY = False
+
+PRITHVI_BANDS = ["B02", "B03", "B04", "B08", "B11", "B12"]
+PRITHVI_BAND_DESCRIPTIONS = ["Blue", "Green", "Red", "Narrow NIR", "SWIR 1", "SWIR 2"]
+
+# Sentinel-2 Scene Classification Layer classes to remove:
+# 0 No data, 1 saturated/defective, 2 dark area pixels, 3 cloud shadows,
+# 7 unclassified, 8 medium cloud, 9 high cloud, 10 cirrus, 11 snow/ice.
+SCL_INVALID_CLASSES = [0, 1, 2, 3, 7, 8, 9, 10, 11]
 # ===================================================
 
 def connect_openeo():
@@ -33,7 +55,8 @@ def connect_openeo():
 def get_prithvi_stacked_tif(con, farm_geojson):
     """
     Downloads 3 monthly composites (6 bands each) and stacks them into a single 18-band GeoTIFF.
-    Optimized for size (uint16 + ZSTD compression + Nodata handling).
+    Optimized for Hugging Face Prithvi demo upload: uint16 values scaled around
+    0-10000, 18 bands, 3 monthly time steps, 6 bands per time step.
     """
     print("Fetching Prithvi-compatible data (3 months, 6 bands)...")
     
@@ -46,18 +69,19 @@ def get_prithvi_stacked_tif(con, farm_geojson):
         "SENTINEL2_L2A",
         spatial_extent=farm_geojson,
         temporal_extent=[start_date.isoformat(), end_date.isoformat()],
-        bands=["B02", "B03", "B04", "B08", "B11", "B12", "SCL"],
-        max_cloud_cover=50
+        bands=PRITHVI_BANDS + ["SCL"],
+        max_cloud_cover=20
     )
     
     # 3. Cloud Masking
     scl = s2.band("SCL")
-    mask = (scl == 4) | (scl == 5) | (scl == 6) | (scl == 11) | (scl == 12)
-    s2_clean = s2.mask(mask)
+    invalid_mask = scl == SCL_INVALID_CLASSES[0]
+    for invalid_class in SCL_INVALID_CLASSES[1:]:
+        invalid_mask = invalid_mask | (scl == invalid_class)
+    s2_clean = s2.mask(invalid_mask)
     
     # 4. Filter Bands (Remove SCL)
-    prithvi_bands = ["B02", "B03", "B04", "B08", "B11", "B12"]
-    s2_spectral = s2_clean.filter_bands(prithvi_bands)
+    s2_spectral = s2_clean.filter_bands(PRITHVI_BANDS)
     
     # 5. Aggregate Temporal
     print("Creating monthly composites...")
@@ -73,12 +97,13 @@ def get_prithvi_stacked_tif(con, farm_geojson):
     
     batch_job.start_and_wait()
     
-    download_dir = "temp_prithvi_data"
-    os.makedirs(download_dir, exist_ok=True)
-    batch_job.get_results().download_files(download_dir)
+    os.makedirs(TEMP_DOWNLOAD_DIR, exist_ok=True)
+    for old_tif in TEMP_DOWNLOAD_DIR.glob("*.tif"):
+        old_tif.unlink()
+    batch_job.get_results().download_files(TEMP_DOWNLOAD_DIR)
     
     # 7. Stack Locally with MAXIMUM Optimization
-    tif_files = sorted(glob.glob(os.path.join(download_dir, "*.tif")))
+    tif_files = sorted(glob.glob(str(TEMP_DOWNLOAD_DIR / "*.tif")))
     
     if not tif_files:
         raise FileNotFoundError("No TIFF files downloaded.")
@@ -112,26 +137,89 @@ def get_prithvi_stacked_tif(con, farm_geojson):
         opt_profile['crs'] = src.crs
         opt_profile['transform'] = src.transform
 
-    with rasterio.open("prithvi_input_stacked.tif", "w", **opt_profile) as dst:
+    with rasterio.open(RAW_STACK_TIF, "w", **opt_profile) as dst:
         for idx, tif_path in enumerate(tif_files):
             with rasterio.open(tif_path) as src:
-                # Read as uint16
-                data = src.read().astype(rasterio.uint16)
-                
-                # Optional: Set background/clouds to 0 if they aren't already
-                # This helps compression significantly
-                # data[data == src.nodata] = 0 
+                data = src.read(masked=True)
+                data = np.ma.filled(data, 0)
+                data = np.nan_to_num(data, nan=0, posinf=0, neginf=0)
+                if np.nanmax(data) <= 1.0:
+                    data = data * 10000.0
+                data = np.clip(data, 0, 65535).astype(rasterio.uint16)
                 
                 start_idx = idx * 6 + 1
                 end_idx = start_idx + 6
                 dst.write(data, indexes=range(start_idx, end_idx))
+                for band_offset, description in enumerate(PRITHVI_BAND_DESCRIPTIONS, start=start_idx):
+                    dst.set_band_description(band_offset, f"T{idx + 1} {description}")
     
     # Check final size
-    final_size_mb = os.path.getsize("prithvi_input_stacked.tif") / (1024 * 1024)
-    print(f"✅ Stacked TIFF created: prithvi_input_stacked.tif ({final_size_mb:.2f} MB)")
-    return "prithvi_input_stacked.tif"
+    final_size_mb = os.path.getsize(RAW_STACK_TIF) / (1024 * 1024)
+    print(f"Stacked TIFF created: {RAW_STACK_TIF} ({final_size_mb:.2f} MB)")
+    return str(RAW_STACK_TIF)
 
-def extract_ndvi_from_stack(input_tif, output_ndvi_tif="ndvi_map.tif"):
+def validate_prithvi_stack(input_tif):
+    """
+    Prints basic sanity checks and writes an RGB preview for the 3 time steps.
+    """
+    print("Validating Prithvi stack...")
+
+    with rasterio.open(input_tif) as src:
+        if src.count != 18:
+            raise ValueError(f"Expected 18 bands, found {src.count}.")
+        if src.nodata is None:
+            raise ValueError("Expected nodata to be set to 0 for the Hugging Face demo mask.")
+
+        data = src.read(masked=True).astype(np.float32)
+        data = np.ma.masked_where(data == src.nodata, data)
+        print(f"Shape: {src.count} bands x {src.height} rows x {src.width} cols")
+        print(f"CRS: {src.crs}")
+        print(f"Data types: {src.dtypes}")
+        print(f"NoData: {src.nodata}")
+
+        for timestep in range(3):
+            start = timestep * 6
+            block = data[start:start + 6]
+            valid_pixels = np.any(~np.ma.getmaskarray(block), axis=0)
+            valid_ratio = float(valid_pixels.mean()) if valid_pixels.size else 0.0
+            print(f"T{timestep + 1}: valid pixel ratio {valid_ratio:.1%}")
+            for band_idx, band_name in enumerate(PRITHVI_BAND_DESCRIPTIONS):
+                band = block[band_idx].compressed()
+                if band.size == 0:
+                    print(f"  {band_name}: no valid pixels")
+                    continue
+                p2, p50, p98 = np.percentile(band, [2, 50, 98])
+                print(f"  {band_name}: p02={p2:.0f}, median={p50:.0f}, p98={p98:.0f}")
+
+        rgb_images = []
+        for timestep in range(3):
+            red = data[timestep * 6 + 2].filled(0)
+            green = data[timestep * 6 + 1].filled(0)
+            blue = data[timestep * 6 + 0].filled(0)
+            rgb = np.stack([red, green, blue], axis=-1)
+            rgb_images.append(_stretch_rgb_preview(rgb))
+
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+    for idx, (axis, rgb) in enumerate(zip(axes, rgb_images), start=1):
+        axis.imshow(rgb)
+        axis.set_title(f"T{idx} RGB")
+        axis.axis("off")
+    plt.tight_layout()
+    plt.savefig(RGB_PREVIEW_PNG, dpi=150)
+    plt.close(fig)
+    print(f"RGB preview saved to: {RGB_PREVIEW_PNG}")
+
+def _stretch_rgb_preview(rgb):
+    valid = rgb[rgb > 0]
+    if valid.size == 0:
+        return np.zeros_like(rgb, dtype=np.uint8)
+    lo, hi = np.percentile(valid, [2, 98])
+    if hi <= lo:
+        hi = lo + 1
+    stretched = np.clip((rgb - lo) / (hi - lo), 0, 1)
+    return (stretched * 255).astype(np.uint8)
+
+def extract_ndvi_from_stack(input_tif, output_ndvi_tif=NDVI_TIF):
     """
     Extracts NDVI from the LATEST time step (bands 13-18) of the 18-band stack.
     """
@@ -148,8 +236,9 @@ def extract_ndvi_from_stack(input_tif, output_ndvi_tif="ndvi_map.tif"):
         nir = data[15, :, :].astype(float) 
         
         # Calculate NDVI
-        ndvi = (nir - red) / (nir + red)
-        ndvi[nir + red == 0] = 0 # Handle division by zero
+        denom = nir + red
+        ndvi = np.zeros_like(red, dtype=float)
+        np.divide(nir - red, denom, out=ndvi, where=denom != 0)
         
         # Save as single band
         profile.update(count=1, dtype=rasterio.float32)
@@ -162,9 +251,13 @@ def extract_ndvi_from_stack(input_tif, output_ndvi_tif="ndvi_map.tif"):
     print(f"Mean NDVI: {mean_ndvi:.3f}")
     return mean_ndvi
 
-def prepare_for_prithvi(input_tif, output_tif="prithvi_ready.tif"):
+def prepare_for_prithvi(input_tif, output_tif=NORMALIZED_TIF):
     """
-    Normalizes the raw stacked TIFF for Prithvi model input.
+    Normalizes the raw stacked TIFF for a local model pipeline that expects
+    already-normalized arrays.
+
+    Do not upload this file to the Hugging Face Space. The Space reads raw
+    0-10000-style values and applies its own preprocessing.
     """
     print(f"Normalizing {input_tif} for Prithvi...")
     
@@ -223,19 +316,24 @@ def classify_and_visualize(ndvi_value, ndvi_map_path):
 
     plt.suptitle("Dhaka Farm Analysis", fontsize=14, fontweight='bold')
     plt.tight_layout()
-    plt.savefig("farm_visualization.png")
-    plt.show()
+    plt.savefig(VISUALIZATION_PNG)
+    plt.close(fig)
+    print(f"Visualization saved to: {VISUALIZATION_PNG}")
 
 def run_pipeline():
     today = datetime.date.today().isoformat()
+    cache_key = f"{today}|{CACHE_VERSION}"
     
     # Cache Check
-    if Path(LAST_RUN_FILE).exists() and Path(LAST_RUN_FILE).read_text().strip() == today:
+    if Path(LAST_RUN_FILE).exists() and Path(LAST_RUN_FILE).read_text().strip() == cache_key:
         print("Data already fetched today. Using cached files.")
-        if os.path.exists("prithvi_input_stacked.tif"):
-            prepare_for_prithvi("prithvi_input_stacked.tif")
-            mean_ndvi = extract_ndvi_from_stack("prithvi_input_stacked.tif")
-            classify_and_visualize(mean_ndvi, "ndvi_map.tif")
+        if RAW_STACK_TIF.exists():
+            validate_prithvi_stack(RAW_STACK_TIF)
+            if CREATE_NORMALIZED_LOCAL_COPY:
+                prepare_for_prithvi(RAW_STACK_TIF)
+            mean_ndvi = extract_ndvi_from_stack(RAW_STACK_TIF)
+            classify_and_visualize(mean_ndvi, NDVI_TIF)
+            print(f"Upload this raw stack to the Hugging Face demo: {RAW_STACK_TIF}")
         return
 
     try:
@@ -243,19 +341,22 @@ def run_pipeline():
         
         # 1. Download & Stack
         raw_tif = get_prithvi_stacked_tif(con, FARM_GEOJSON)
+        validate_prithvi_stack(raw_tif)
         
-        # 2. Prepare for Prithvi (Normalize)
-        prepare_for_prithvi(raw_tif)
+        # 2. Optional local-only normalization. The Hugging Face demo wants
+        # the raw 18-band stack, not this normalized output.
+        if CREATE_NORMALIZED_LOCAL_COPY:
+            prepare_for_prithvi(raw_tif)
         
         # 3. Extract NDVI for Visualization
         mean_ndvi = extract_ndvi_from_stack(raw_tif)
         
         # 4. Visualize
-        classify_and_visualize(mean_ndvi, "ndvi_map.tif")
+        classify_and_visualize(mean_ndvi, NDVI_TIF)
         
         # Update Cache
-        Path(LAST_RUN_FILE).write_text(today)
-        print("✅ Pipeline Complete!")
+        Path(LAST_RUN_FILE).write_text(cache_key)
+        print("Pipeline complete.")
         
     except Exception as e:
         print(f"❌ Error: {e}")
