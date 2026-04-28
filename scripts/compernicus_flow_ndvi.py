@@ -1,6 +1,7 @@
 import openeo
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
 import geopandas as gpd
 from fpdf import FPDF
 import datetime
@@ -160,70 +161,101 @@ def send_email(report_path, zone_map_path):
     except Exception as e:
         print(f" Failed to send email: {e}")
         
-def classify_and_visualize(ndvi_value, ndvi_map_path):
-    """
-    Loads the raster, classifies pixels, and opens an interactive window.
-    """
-    print("Loading raster data for visualization...")
+# def classify_and_visualize(ndvi_value, ndvi_map_path):
+#     """
+#     Loads the raster, classifies pixels, and opens an interactive window.
+#     """
+#     print("Loading raster data for visualization...")
     
-    if not os.path.exists(ndvi_map_path):
-        raise FileNotFoundError(f"Map file {ndvi_map_path} not found.")
+#     if not os.path.exists(ndvi_map_path):
+#         raise FileNotFoundError(f"Map file {ndvi_map_path} not found.")
 
-    # 1. Load the GeoTIFF
+#     # 1. Load the GeoTIFF
+#     with rasterio.open(ndvi_map_path) as src:
+#         ndvi_data = src.read(1)
+#         ndvi_data = np.ma.masked_where(ndvi_data == src.nodata, ndvi_data)
+#         ndvi_data = np.ma.masked_invalid(ndvi_data)
+
+#     # 2. Classify each pixel
+#     classification = np.zeros_like(ndvi_data)
+#     classification[ndvi_data > 0.45] = 1  # Moderate
+#     classification[ndvi_data > 0.65] = 2  # Healthy
+    
+#     # Define colors for classification
+#     cmap_class = mcolors.ListedColormap(['#d73027', '#fdae61', '#1a9850'])
+#     bounds = [0, 1, 2, 3]
+#     norm_class = mcolors.BoundaryNorm(bounds, cmap_class.N)
+
+#     # Define colors for NDVI continuous map
+#     cmap_ndvi = plt.get_cmap('RdYlGn')
+
+#     # 3. Create Interactive Plot
+#     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    
+#     # --- Left Plot: Continuous NDVI ---
+#     im1 = axes[0].imshow(ndvi_data, cmap=cmap_ndvi, vmin=0, vmax=1)
+#     axes[0].set_title(f"Continuous NDVI\nAvg: {ndvi_value:.3f}", fontsize=12)
+#     axes[0].axis('off')
+#     plt.colorbar(im1, ax=axes[0], label="NDVI Value")
+
+#     # --- Right Plot: Classified Zones ---
+#     im2 = axes[1].imshow(classification, cmap=cmap_class, norm=norm_class)
+#     axes[1].set_title("Stress Classification Zones", fontsize=12)
+#     axes[1].axis('off')
+    
+#     # Custom legend
+#     labels = ["High Stress (<0.45)", "Moderate (0.45-0.65)", "Healthy (>0.65)"]
+#     handles = [Rectangle((0,0),1,1, color=cmap_class(i)) for i in range(3)]
+#     axes[1].legend(handles, labels, loc='upper right', fontsize=8)
+
+#     # Status Text
+#     if ndvi_value > 0.65:
+#         status_text = "Status: HEALTHY 🌱"
+#         color = "green"
+#     elif ndvi_value > 0.45:
+#         status_text = "Status: MODERATE STRESS ⚠️"
+#         color = "orange"
+#     else:
+#         status_text = "Status: HIGH STRESS ❌"
+#         color = "red"
+        
+#     fig.suptitle(f"Farm Report - {datetime.date.today()} | {status_text}", 
+#                  fontsize=14, fontweight='bold', color=color)
+
+#     plt.tight_layout()
+#     plt.show()
+def classify_and_visualize(ndvi_value, ndvi_map_path):
+    print("Loading raster data for vegetation-focused visualization...")
+    
     with rasterio.open(ndvi_map_path) as src:
         ndvi_data = src.read(1)
+        # 1. Standard Masking
         ndvi_data = np.ma.masked_where(ndvi_data == src.nodata, ndvi_data)
-        ndvi_data = np.ma.masked_invalid(ndvi_data)
+        
+        # 2. Vegetation Filter: Mask out everything with NDVI < 0.2 (Urban/Bare Soil)
+        # This keeps only pixels that have some level of vegetation
+        ndvi_vegetation_only = np.ma.masked_where(ndvi_data < 0.2, ndvi_data)
 
-    # 2. Classify each pixel
-    classification = np.zeros_like(ndvi_data)
-    classification[ndvi_data > 0.45] = 1  # Moderate
-    classification[ndvi_data > 0.65] = 2  # Healthy
-    
-    # Define colors for classification
-    cmap_class = mcolors.ListedColormap(['#d73027', '#fdae61', '#1a9850'])
-    bounds = [0, 1, 2, 3]
-    norm_class = mcolors.BoundaryNorm(bounds, cmap_class.N)
-
-    # Define colors for NDVI continuous map
-    cmap_ndvi = plt.cm.RdYlGn
-
-    # 3. Create Interactive Plot
+    # 3. Create Plot
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
     
-    # --- Left Plot: Continuous NDVI ---
-    im1 = axes[0].imshow(ndvi_data, cmap=cmap_ndvi, vmin=0, vmax=1)
-    axes[0].set_title(f"Continuous NDVI\nAvg: {ndvi_value:.3f}", fontsize=12)
+    # --- Left Plot: Vegetation Only ---
+    # We use the 'ndvi_vegetation_only' mask here
+    im1 = axes[0].imshow(ndvi_vegetation_only, cmap='Greens', vmin=0.2, vmax=0.9)
+    axes[0].set_title("Vegetation Health (Filtered)", fontsize=12)
     axes[0].axis('off')
     plt.colorbar(im1, ax=axes[0], label="NDVI Value")
 
-    # --- Right Plot: Classified Zones ---
-    im2 = axes[1].imshow(classification, cmap=cmap_class, norm=norm_class)
-    axes[1].set_title("Stress Classification Zones", fontsize=12)
+    # --- Right Plot: Urban vs Vegetation (for context) ---
+    # We show the original data here to keep context
+    im2 = axes[1].imshow(ndvi_data, cmap='RdYlGn', vmin=0, vmax=1)
+    axes[1].set_title("Full Scene (Urban + Vegetation)", fontsize=12)
     axes[1].axis('off')
-    
-    # Custom legend
-    labels = ["High Stress (<0.45)", "Moderate (0.45-0.65)", "Healthy (>0.65)"]
-    handles = [plt.Rectangle((0,0),1,1, color=cmap_class(i)) for i in range(3)]
-    axes[1].legend(handles, labels, loc='upper right', fontsize=8)
+    plt.colorbar(im2, ax=axes[1], label="NDVI Value")
 
-    # Status Text
-    if ndvi_value > 0.65:
-        status_text = "Status: HEALTHY 🌱"
-        color = "green"
-    elif ndvi_value > 0.45:
-        status_text = "Status: MODERATE STRESS ⚠️"
-        color = "orange"
-    else:
-        status_text = "Status: HIGH STRESS ❌"
-        color = "red"
-        
-    fig.suptitle(f"Farm Report - {datetime.date.today()} | {status_text}", 
-                 fontsize=14, fontweight='bold', color=color)
-
+    plt.suptitle("Dhaka Vegetation Analysis", fontsize=14, fontweight='bold')
     plt.tight_layout()
     plt.show()
-
 def run_pipeline_visual():
     """
     Main execution flow for visualization mode.
