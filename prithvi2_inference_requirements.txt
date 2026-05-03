@@ -1,0 +1,25 @@
+# Prithvi-EO-2.0-300M-TL-Sen1Floods11 inference dependencies.
+#
+# This model uses TerraTorch, not the legacy MMSegmentation/MMCV stack used by
+# Prithvi 1.0 Sen1Floods11.
+#
+# CPU example:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r prithvi2_inference_requirements.txt
+#
+# CUDA example: choose the index URL that matches your driver/CUDA runtime.
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+#   pip install -r prithvi2_inference_requirements.txt
+
+numpy
+rasterio
+matplotlib
+huggingface_hub
+pyyaml
+einops
+timm
+
+# The model card's inference script uses TerraTorch's LightningInferenceModel.
+# Use the TerraTorch repo if the PyPI package is unavailable/stale in your env.
+terratorch
+# git+https://github.com/IBM/terratorch.git

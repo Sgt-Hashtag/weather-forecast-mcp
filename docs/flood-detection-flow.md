@@ -14,7 +14,7 @@ scripts/run_flood_detection_pipeline.sh
 Optional tuning:
 
 ```bash
-DEVICE=cuda NDVI_MAX=0.12 MNDWI_MIN=0.05 NDWI_MIN=0.0 MIN_AREA=30 scripts/run_flood_detection_pipeline.sh
+MODEL=prithvi2 DEVICE=cuda NDVI_MAX=0.12 MNDWI_MIN=0.05 NDWI_MIN=0.0 MIN_AREA=30 scripts/run_flood_detection_pipeline.sh
 ```
 
 ## Pipeline Stages
@@ -49,6 +49,32 @@ scripts/prithvi_flood_prediction_preview.png
 
 This is the raw Prithvi flood/water-like prediction. It may include false
 positives on grass or other dark/vegetated pixels.
+
+The automation script uses the newer TerraTorch-based Prithvi 2.0 Sen1Floods11
+model by default. To run it directly:
+
+```bash
+python3 scripts/prithvi2_flood_inference.py --device auto
+```
+
+Creates:
+
+```text
+scripts/prithvi2_flood_prediction.tif
+scripts/prithvi2_flood_prediction_preview.png
+```
+
+Then postprocess it by passing that raw mask:
+
+```bash
+python3 scripts/postprocess_flood_mask.py --raw-mask scripts/prithvi2_flood_prediction.tif
+```
+
+To use the older Prithvi 1.0/MMCV runner in the full pipeline:
+
+```bash
+MODEL=prithvi1 scripts/run_flood_detection_pipeline.sh
+```
 
 ### 3. Postprocess Flood Mask
 
