@@ -10,6 +10,9 @@
 # CUDA example: choose the index URL that matches your driver/CUDA runtime.
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 #   pip install -r prithvi2_inference_requirements.txt
+#
+# The Dockerfile installs mmcv==1.7.2/mmsegmentation==0.30.0 separately with
+# --no-build-isolation, then uses this file for the TerraTorch stack.
 
 numpy
 rasterio

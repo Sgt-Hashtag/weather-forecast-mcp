@@ -79,6 +79,60 @@ User Query → LLM Agent → District Extraction → Weather MCP → BMD Scrapin
 | "Weather forecast for Pabna tomorrow" | Unknown | 1 | Pabna |
 | "7-day forecast for Cox's Bazar" | Unknown | 7 | Cox's Bazar |
 
+## 🌊 Flood Segmentation With Prithvi 2.0
+
+The Docker agent image includes the local flood-segmentation stack for
+`ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11`. During
+`docker compose build agent`, Docker prefetches the Hugging Face `config.yaml`
+and fine-tuned checkpoint into `/app/models/huggingface`, so inference can run
+without waiting for the 1.28GB model download at first execution.
+
+The flood pipeline writes its inputs and outputs under `scripts/`. Compose mounts
+`./scripts` to `/app/scripts`, so container output files appear on the host.
+
+### Build
+
+CPU build:
+```bash
+docker compose build agent
+```
+
+GPU build:
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml build agent
+```
+
+To skip Prithvi2 model prefetch during build:
+```bash
+DOWNLOAD_PRITHVI2_MODEL=false docker compose build agent
+```
+
+### Run Prithvi2 Inference
+
+First create the Sentinel-2 GeoTIFF input:
+```bash
+docker compose run --rm agent python /app/scripts/copernicus_flood_segmentation.py
+```
+
+Then run Prithvi-EO-2.0 Sen1Floods11:
+```bash
+docker compose run --rm agent python /app/scripts/prithvi2_flood_inference.py --device auto
+```
+
+Expected outputs:
+```text
+scripts/prithvi2_flood_prediction.tif
+scripts/prithvi2_flood_prediction_preview.png
+```
+
+For the full automated flow, including vegetation/water postprocessing:
+```bash
+docker compose run --rm agent bash /app/scripts/run_flood_detection_pipeline.sh
+```
+
+For more details and threshold tuning, see
+`docs/flood-detection-flow.md`.
+
 ## 🔧 Technical Details
 
 ### Data Sources
@@ -272,7 +326,7 @@ GPU inference is opt-in. The base `docker-compose.yml` runs entirely on CPU and 
 docker compose up --build -d
 ```
 
-PyTorch CPU wheels are installed by default (~500 MB). Inference runs on CPU — slower but works everywhere.
+PyTorch CPU wheels are installed by default. Inference runs on CPU — slower but works everywhere. The agent build also prefetches the Prithvi2 flood model unless `DOWNLOAD_PRITHVI2_MODEL=false` is set.
 
 #### GPU mode
 
@@ -282,11 +336,18 @@ PyTorch CPU wheels are installed by default (~500 MB). Inference runs on CPU —
 
 **Step 1 — Build with CUDA PyTorch wheels:**
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
-  build --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml build
 ```
 
-`cu128` targets CUDA 12.8. For older drivers use `cu121` or `cu118`. CPU wheels are ~500 MB; CUDA wheels are ~2.5 GB.
+The GPU override defaults to `TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128`.
+For older drivers, override it:
+
+```bash
+TORCH_INDEX_URL=https://download.pytorch.org/whl/cu121 \
+  docker compose -f docker-compose.yml -f docker-compose.gpu.yml build
+```
+
+CPU wheels are smaller; CUDA wheels are much larger.
 
 **Step 2 — Start with GPU override:**
 ```bash
@@ -295,6 +356,7 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 
 This merges `docker-compose.gpu.yml` on top of the base file, which:
 - Sets `GPU_INFERENCE=true` → agribound uses `device="auto"` (resolves to CUDA)
+- Sets the CUDA PyTorch wheel index for Docker builds
 - Reserves one NVIDIA GPU for the container
 
 **Verify GPU is active:**

@@ -1,6 +1,11 @@
 services:
   agent:
-    build: ./services/agent
+    build:
+      context: .
+      dockerfile: services/agent/Dockerfile
+      args:
+        TORCH_INDEX_URL: ${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
+        DOWNLOAD_PRITHVI2_MODEL: ${DOWNLOAD_PRITHVI2_MODEL:-true}
     ports:
       - "8000:8000"
     stdin_open: true
@@ -10,9 +15,13 @@ services:
       - MAPBOX_ACCESS_TOKEN=${MAPBOX_ACCESS_TOKEN}
       - GEE_PROJECT_ID=${GEE_PROJECT_ID}
       - PYTHONUNBUFFERED=1
+      - HF_HOME=/app/models/huggingface
+      - HF_HUB_CACHE=/app/models/huggingface/hub
+      - PRITHVI2_MODEL_REPO=ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11
     env_file:
       - .env
     volumes:
+      - ./scripts:/app/scripts
       - ./services/agent/mcp_weather/data:/app/mcp_weather/data:ro
       - ./secrets:/app/secrets:ro
     healthcheck:

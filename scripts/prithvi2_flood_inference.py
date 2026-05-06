@@ -13,6 +13,7 @@ Output classes:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import tempfile
 import time
@@ -28,7 +29,7 @@ DEFAULT_INPUT = BASE_DIR / "prithvi_flood_input.tif"
 DEFAULT_OUTPUT = BASE_DIR / "prithvi2_flood_prediction.tif"
 DEFAULT_PREVIEW = BASE_DIR / "prithvi2_flood_prediction_preview.png"
 
-MODEL_REPO = "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11"
+MODEL_REPO = os.getenv("PRITHVI2_MODEL_REPO", "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11")
 CONFIG_FILE = "config.yaml"
 CHECKPOINT_FILE = "Prithvi-EO-V2-300M-TL-Sen1Floods11.pt"
 DEFAULT_BANDS = [1, 2, 3, 8, 11, 12]

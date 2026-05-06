@@ -17,6 +17,39 @@ Optional tuning:
 MODEL=prithvi2 DEVICE=cuda NDVI_MAX=0.12 MNDWI_MIN=0.05 NDWI_MIN=0.0 MIN_AREA=30 scripts/run_flood_detection_pipeline.sh
 ```
 
+## Docker Setup
+
+The agent Docker image is wired for Prithvi-EO-2.0-300M-TL-Sen1Floods11. By
+default, `docker compose build agent` downloads the Hugging Face config and
+fine-tuned checkpoint into `/app/models/huggingface` inside the image, so the
+first inference run does not wait on the 1.28GB checkpoint.
+
+```bash
+docker compose build agent
+```
+
+To skip model prefetch during image build and let the first inference command
+download it instead:
+
+```bash
+DOWNLOAD_PRITHVI2_MODEL=false docker compose build agent
+```
+
+For CUDA wheels, pass the PyTorch wheel index that matches your runtime:
+
+```bash
+TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128 docker compose build agent
+```
+
+Run Prithvi 2.0 inference in the container:
+
+```bash
+docker compose run --rm agent python /app/scripts/prithvi2_flood_inference.py --device auto
+```
+
+The Compose file mounts `./scripts` to `/app/scripts`, so generated TIFF and PNG
+outputs are written back to the project `scripts/` directory.
+
 ## Pipeline Stages
 
 ### 1. Create Model Input

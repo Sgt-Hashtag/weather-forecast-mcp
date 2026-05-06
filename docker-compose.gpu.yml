@@ -1,5 +1,8 @@
 services:
   agent:
+    build:
+      args:
+        TORCH_INDEX_URL: ${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}
     environment:
       - GPU_INFERENCE=true
     deploy:
