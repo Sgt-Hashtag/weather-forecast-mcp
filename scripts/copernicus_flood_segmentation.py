@@ -401,13 +401,13 @@ def run_flood_pipeline():
         # print("  1. Upload to Hugging Face Demo:")
         # print("     https://huggingface.co/spaces/ibm-nasa-geospatial/Prithvi-100M-sen1floods11-demo")
         # print("\n  2. Or run local inference (see run_inference_with_model function)")
-        if (data):
-            print("\nFile specifications:")
-            print(f"  - Format: GeoTIFF")
-            print(f"  - Bands: {len(S2_ALL_BANDS)} ({', '.join(S2_ALL_BANDS)})")
-            print(f"  - Model bands: {', '.join(MODEL_BANDS)}")
-            print(f"  - Scale: Surface Reflectance × 10000")
-            print(f"  - Shape: {data.shape}")
+        # if (data):
+        #     print("\nFile specifications:")
+        #     print(f"  - Format: GeoTIFF")
+        #     print(f"  - Bands: {len(S2_ALL_BANDS)} ({', '.join(S2_ALL_BANDS)})")
+        #     print(f"  - Model bands: {', '.join(MODEL_BANDS)}")
+        #     print(f"  - Scale: Surface Reflectance × 10000")
+        #     print(f"  - Shape: {data.shape}")
 
     except Exception as e:
         print(f"\n❌ Error in pipeline: {e}")
