@@ -67,6 +67,21 @@ scripts/prithvi_flood_seg/prithvi_flood_input.tif
 This script downloads recent Sentinel-2 imagery through OpenEO/Copernicus,
 cloud-masks it, composites it, and writes a 13-band GeoTIFF.
 
+If Copernicus returns `NoDataAvailable`, the script automatically retries with
+wider lookback windows and looser scene cloud-cover thresholds. Useful overrides:
+
+```bash
+END_OFFSET_DAYS=10 LOOKBACK_DAYS=30,90,180 MAX_CLOUD_COVER=20,50,80 \
+  python3 scripts/prithvi_flood_seg/copernicus_flood_segmentation.py
+```
+
+For a known event window:
+
+```bash
+START_DATE=2024-08-01 END_DATE=2024-09-15 MAX_CLOUD_COVER=80 \
+  python3 scripts/prithvi_flood_seg/copernicus_flood_segmentation.py
+```
+
 ### 2. Run Prithvi 2.0 Inference
 
 ```bash

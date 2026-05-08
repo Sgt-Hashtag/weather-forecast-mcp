@@ -41,6 +41,9 @@ LAST_RUN_FILE = BASE_DIR / "last_processed_flood.txt"
 TEMP_DOWNLOAD_DIR = BASE_DIR / "temp_flood_data"
 OUTPUT_TIF = BASE_DIR / "prithvi_flood_input.tif"
 CACHE_VERSION = "scl-mask-full-s2-v2"
+DEFAULT_LOOKBACK_DAYS = [30, 60, 120]
+DEFAULT_MAX_CLOUD_COVERS = [20, 50, 80, 100]
+DEFAULT_END_OFFSET_DAYS = 5
 
 # The Prithvi 2.0 runner keeps the same Sentinel-2 band subset:
 # B02, B03, B04, B8A, B11, B12.
@@ -79,7 +82,7 @@ def connect_openeo():
     con.authenticate_oidc()
     return con
 
-def get_optical_data(con, geojson, start_date, end_date):
+def get_optical_data(con, geojson, start_date, end_date, max_cloud_cover):
     """
     Fetches Sentinel-2 L2A data (Surface Reflectance).
 
@@ -90,13 +93,14 @@ def get_optical_data(con, geojson, start_date, end_date):
     print("Fetching Sentinel-2 Optical data...")
     print(f"  Bands: {', '.join(S2_DOWNLOAD_BANDS)}")
     print(f"  Date range: {start_date} to {end_date}")
+    print(f"  Max scene cloud cover: {max_cloud_cover}%")
 
     s2 = con.load_collection(
         "SENTINEL2_L2A",
         spatial_extent=geojson,
         temporal_extent=[start_date, end_date],
         bands=S2_DOWNLOAD_BANDS + ["SCL"],
-        max_cloud_cover=20
+        max_cloud_cover=max_cloud_cover
     )
 
     # Cloud Masking using SCL band
@@ -115,7 +119,7 @@ def get_optical_data(con, geojson, start_date, end_date):
 
     # Save as GeoTIFF
     job = s2_median.save_result(format="GTiff")
-    batch_job = job.create_job(title="Sentinel-2 Flood Input")
+    batch_job = job.create_job(title=f"Sentinel-2 Flood Input cloud<={max_cloud_cover}")
     print("  Starting OpenEO job...")
     batch_job.start_and_wait()
 
@@ -127,6 +131,74 @@ def get_optical_data(con, geojson, start_date, end_date):
     print(f"  Downloaded to: {opt_path}")
 
     return str(opt_path)
+
+def get_optical_data_with_fallbacks(con, geojson, attempts):
+    """Try progressively wider/looser Sentinel-2 searches until OpenEO returns data."""
+    errors = []
+    for attempt_idx, attempt in enumerate(attempts, start=1):
+        start_date, end_date, max_cloud_cover = attempt
+        print("\n" + "-" * 60)
+        print(
+            f"Sentinel-2 search attempt {attempt_idx}/{len(attempts)}: "
+            f"{start_date} to {end_date}, cloud<={max_cloud_cover}%"
+        )
+        try:
+            return get_optical_data(con, geojson, start_date, end_date, max_cloud_cover)
+        except Exception as exc:
+            message = str(exc)
+            errors.append(f"{start_date} to {end_date}, cloud<={max_cloud_cover}%: {message}")
+            print(f"  OpenEO attempt failed: {message}")
+            if not _looks_like_no_data_error(message):
+                print("  Failure was not clearly a no-data response; trying the next fallback anyway.")
+
+    details = "\n  - ".join(errors)
+    raise RuntimeError(
+        "No Sentinel-2 data could be fetched for the configured AOI/date range. "
+        "Try a larger AOI, older END_DATE, or looser MAX_CLOUD_COVER.\n"
+        f"Attempts:\n  - {details}"
+    )
+
+def _looks_like_no_data_error(message):
+    lowered = message.lower()
+    return "nodataavailable" in lowered or "no data available" in lowered or "status: error" in lowered
+
+def build_fetch_attempts():
+    cloud_covers = _parse_int_list_env("MAX_CLOUD_COVER", DEFAULT_MAX_CLOUD_COVERS)
+    explicit_start = os.getenv("START_DATE")
+    explicit_end = os.getenv("END_DATE")
+
+    if explicit_start or explicit_end:
+        if not explicit_start or not explicit_end:
+            raise ValueError("Set both START_DATE and END_DATE, or neither.")
+        _parse_iso_date(explicit_start, "START_DATE")
+        _parse_iso_date(explicit_end, "END_DATE")
+        return [(explicit_start, explicit_end, cloud_cover) for cloud_cover in cloud_covers]
+
+    end_offset_days = int(os.getenv("END_OFFSET_DAYS", str(DEFAULT_END_OFFSET_DAYS)))
+    end_date = datetime.date.today() - timedelta(days=end_offset_days)
+    lookback_days = _parse_int_list_env("LOOKBACK_DAYS", DEFAULT_LOOKBACK_DAYS)
+
+    attempts = []
+    for cloud_cover in cloud_covers:
+        for lookback in lookback_days:
+            start_date = end_date - timedelta(days=lookback)
+            attempts.append((start_date.isoformat(), end_date.isoformat(), cloud_cover))
+    return attempts
+
+def _parse_int_list_env(name, default_values):
+    raw = os.getenv(name)
+    if not raw:
+        return list(default_values)
+    values = [int(part.strip()) for part in raw.split(",") if part.strip()]
+    if not values:
+        raise ValueError(f"{name} did not contain any integer values.")
+    return values
+
+def _parse_iso_date(value, name):
+    try:
+        return datetime.date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be YYYY-MM-DD, got {value!r}.") from exc
 
 def prepare_prithvi_input(opt_path, output_tif=OUTPUT_TIF):
     """
@@ -293,7 +365,8 @@ def validate_prithvi_input(input_tif):
 def run_flood_pipeline():
     """Main pipeline execution"""
     today = datetime.date.today().isoformat()
-    cache_key = f"{today}|{CACHE_VERSION}"
+    attempts = build_fetch_attempts()
+    cache_key = f"{today}|{CACHE_VERSION}|{_attempts_cache_key(attempts)}"
 
     # Check if we already ran today
     if Path(LAST_RUN_FILE).exists() and Path(LAST_RUN_FILE).read_text().strip() == cache_key:
@@ -312,22 +385,21 @@ def run_flood_pipeline():
         # Connect to OpenEO
         con = connect_openeo()
 
-        # Define date range (last 30 days for recent flood status)
-        end_date = datetime.date.today()
-        start_date = end_date - timedelta(days=30)
+        first_start, first_end, _ = attempts[0]
 
         print("\n" + "="*60)
         print("PRITHVI FLOOD SEGMENTATION PIPELINE")
         print("="*60)
         print(f"Area of Interest: {FARM_GEOJSON['coordinates'][0]}")
-        print(f"Date Range: {start_date} to {end_date}")
+        print(f"Initial Date Range: {first_start} to {first_end}")
+        print(f"Fallback attempts: {len(attempts)}")
         print(f"Upload Bands: {', '.join(S2_ALL_BANDS)}")
         print(f"Model Extracts: {', '.join(MODEL_BANDS)}")
         print("="*60)
 
         # Step 1: Fetch Sentinel-2 data
         print("\n[Step 1/3] Fetching Sentinel-2 data from Copernicus...")
-        opt_path = get_optical_data(con, FARM_GEOJSON, start_date.isoformat(), end_date.isoformat())
+        opt_path = get_optical_data_with_fallbacks(con, FARM_GEOJSON, attempts)
 
         # Step 2: Prepare input for Prithvi model
         print("\n[Step 2/3] Preparing model input...")
@@ -352,6 +424,13 @@ def run_flood_pipeline():
         return False
 
     return True
+
+def _attempts_cache_key(attempts):
+    if not attempts:
+        return "no-attempts"
+    first = attempts[0]
+    last = attempts[-1]
+    return f"{len(attempts)}:{first[0]}:{first[1]}:{first[2]}:{last[0]}:{last[1]}:{last[2]}"
 
 if __name__ == "__main__":
     success = run_flood_pipeline()

@@ -18,6 +18,7 @@ numpy
 rasterio
 matplotlib
 huggingface_hub
+openeo
 pyyaml
 einops
 timm
