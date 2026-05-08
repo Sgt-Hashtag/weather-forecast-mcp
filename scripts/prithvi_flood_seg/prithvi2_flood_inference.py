@@ -2,7 +2,7 @@
 """
 Run Prithvi-EO-2.0-300M-TL-Sen1Floods11 flood segmentation locally.
 
-Default input is produced by scripts/copernicus_flood_segmentation.py.
+Default input is produced by scripts/prithvi_flood_seg/copernicus_flood_segmentation.py.
 
 Output classes:
   0 = land / non-flood
@@ -85,7 +85,7 @@ def _install_mmcv_ops_compat():
     """
     TerraTorch imports MMSeg registries in this environment. MMSegmentation 0.x
     imports a few mmcv.ops symbols during registry setup, but Python 3.12 cannot
-    use old mmcv-full wheels. These stubs let registration complete as long as
+    use those compiled ops wheels. These stubs let registration complete as long as
     the selected model does not actually request those compiled ops.
     """
     try:
@@ -129,7 +129,7 @@ def _install_mmcv_ops_compat():
         def __init__(self, *args, **kwargs):
             raise RuntimeError(
                 "This model requested an MMCV compiled op unavailable with "
-                "plain mmcv. Use a compatible mmcv-full env if this op is required."
+                "plain mmcv. Use a compatible compiled MMCV ops environment if this op is required."
             )
 
     ops.sigmoid_focal_loss = sigmoid_focal_loss

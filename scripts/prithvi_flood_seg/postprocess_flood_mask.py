@@ -4,7 +4,7 @@ Postprocess Prithvi flood predictions to reduce vegetation false positives.
 
 Inputs:
   - prithvi_flood_input.tif: 13-band Sentinel-2 stack from copernicus_flood_segmentation.py
-  - prithvi_flood_prediction.tif: raw model mask from prithvi_flood_inference.py
+  - prithvi2_flood_prediction.tif: raw model mask from prithvi2_flood_inference.py
 
 Output classes:
   0 = not flood
@@ -25,7 +25,7 @@ import rasterio
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_INPUT = BASE_DIR / "prithvi_flood_input.tif"
-DEFAULT_RAW_MASK = BASE_DIR / "prithvi_flood_prediction.tif"
+DEFAULT_RAW_MASK = BASE_DIR / "prithvi2_flood_prediction.tif"
 DEFAULT_OUTPUT = BASE_DIR / "prithvi_flood_prediction_filtered.tif"
 DEFAULT_PREVIEW = BASE_DIR / "prithvi_flood_prediction_filtered_preview.png"
 

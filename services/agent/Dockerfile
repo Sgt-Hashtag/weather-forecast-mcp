@@ -78,7 +78,7 @@ COPY docs/ /app/docs/
 # Prefetch the Prithvi 2.0 fine-tuned config/checkpoint into the image so
 # inference starts without waiting for the 1.28GB checkpoint download.
 RUN if [ "$DOWNLOAD_PRITHVI2_MODEL" = "true" ]; then \
-      python /app/scripts/download_prithvi2_model.py; \
+      python /app/scripts/prithvi_flood_seg/download_prithvi2_model.py; \
     fi
 
 # Setup secrets directory

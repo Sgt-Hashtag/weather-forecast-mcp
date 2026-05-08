@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Flood Segmentation using Prithvi-EO-1.0-100M-sen1floods11 Model
+Prepare Sentinel-2 input for Prithvi-EO-2.0-300M-TL-Sen1Floods11 flood segmentation.
 
 This script fetches Sentinel-2 data from Copernicus Data Space Ecosystem (CDSE)
-and creates a GeoTIFF input for the Prithvi flood segmentation Hugging Face demo.
+and creates a GeoTIFF input for the local Prithvi 2.0 flood segmentation runner.
 
-The demo expects a normal Sentinel-2 stack and uses the model config to extract:
+The model expects a normal Sentinel-2 stack and uses the model config to extract:
 B02, B03, B04, B8A, B11, B12. Data must be in reflectance units multiplied by
 10,000.
 
@@ -42,8 +42,7 @@ TEMP_DOWNLOAD_DIR = BASE_DIR / "temp_flood_data"
 OUTPUT_TIF = BASE_DIR / "prithvi_flood_input.tif"
 CACHE_VERSION = "scl-mask-full-s2-v2"
 
-# The Hugging Face demo keeps its default BandsExtract=[1, 2, 3, 8, 11, 12].
-# That matches the Sen1Floods11 13-band Sentinel-2 order below:
+# The Prithvi 2.0 runner keeps the same Sentinel-2 band subset:
 # B02, B03, B04, B8A, B11, B12.
 S2_ALL_BANDS = [
     "B01", "B02", "B03", "B04", "B05", "B06", "B07",
@@ -71,10 +70,6 @@ BAND_DESCRIPTIONS = {
 # Sentinel-2 Scene Classification Layer classes to remove.
 SCL_INVALID_CLASSES = [0, 1, 2, 3, 8, 9, 10, 11]
 
-# Model normalization parameters (from sen1floods11_Prithvi_100M.py config)
-IMG_NORM_MEANS = [0.14245495, 0.13921481, 0.12434631, 0.31420089, 0.20743526, 0.12046503]
-IMG_NORM_STDS = [0.04036231, 0.04186983, 0.05267646, 0.0822221, 0.06834774, 0.05294205]
-
 # ===================================================
 
 def connect_openeo():
@@ -89,7 +84,7 @@ def get_optical_data(con, geojson, start_date, end_date):
     Fetches Sentinel-2 L2A data (Surface Reflectance).
 
     Returns a median composite of the full 13-band Sentinel-2 stack expected by
-    the demo before its BandsExtract step.
+    the model before its band extraction step.
     Cloud masking is applied using the SCL (Scene Classification Layer).
     """
     print("Fetching Sentinel-2 Optical data...")
@@ -135,7 +130,7 @@ def get_optical_data(con, geojson, start_date, end_date):
 
 def prepare_prithvi_input(opt_path, output_tif=OUTPUT_TIF):
     """
-    Prepares the Sentinel-2 data for the Prithvi sen1floods11 demo.
+    Prepares Sentinel-2 data for the Prithvi 2.0 Sen1Floods11 runner.
 
     Requirements:
     - 13 bands in Sen1Floods11/Sentinel-2 order
@@ -207,7 +202,7 @@ def prepare_prithvi_input(opt_path, output_tif=OUTPUT_TIF):
 
         print(f"\n✅ Prithvi input saved: {output_path}")
         print(f"   Shape: {data.shape} (bands, height, width)")
-        print(f"   Demo input bands: {', '.join(S2_ALL_BANDS)}")
+        print(f"   Input bands: {', '.join(S2_ALL_BANDS)}")
         print(f"   Model extracts: {', '.join(MODEL_BANDS)}")
         print(f"   CRS: {profile['crs']}")
         print(f"   Resolution: {profile['transform'][0]:.2f} m/pixel")
@@ -269,7 +264,7 @@ def visualize_input(input_tif, data):
     plt.close()
 
 def validate_prithvi_input(input_tif):
-    """Prints upload sanity checks for the Hugging Face demo."""
+    """Prints Prithvi 2.0 input sanity checks."""
     print("\nValidating Prithvi flood input...")
     with rasterio.open(input_tif) as src:
         if src.count != len(S2_ALL_BANDS):
@@ -294,53 +289,6 @@ def validate_prithvi_input(input_tif):
                 continue
             p2, p50, p98 = np.percentile(band, [2, 50, 98])
             print(f"  {band_name}: p02={p2:.0f}, median={p50:.0f}, p98={p98:.0f}")
-
-def run_inference_with_model(input_tif):
-    """
-    Optional: Run inference locally using the Prithvi model.
-    Requires mmsegmentation and terratorch libraries.
-
-    This function shows how to use the model programmatically.
-    For most users, uploading to the HF Demo space is easier.
-    """
-    print("\n" + "="*60)
-    print("OPTIONAL: Local Inference Setup")
-    print("="*60)
-    print("""
-To run inference locally, you need to install additional dependencies:
-
-pip install mmcv-full mmsegmentation timm opencv-python-headless
-
-Then use the following code:
-
-```python
-from mmcv import Config
-from mmseg.apis import init_segmentor
-from huggingface_hub import hf_hub_download
-import os
-
-# Download model files
-config_path = hf_hub_download(
-    repo_id="ibm-nasa-geospatial/Prithvi-EO-1.0-100M-sen1floods11",
-    filename="sen1floods11_Prithvi_100M.py"
-)
-ckpt_path = hf_hub_download(
-    repo_id="ibm-nasa-geospatial/Prithvi-EO-1.0-100M-sen1floods11",
-    filename="sen1floods11_Prithvi_100M.pth"
-)
-
-# Load model
-config = Config.fromfile(config_path)
-config.model.backbone.pretrained = None
-model = init_segmentor(config, ckpt_path, device='cuda' if torch.cuda.is_available() else 'cpu')
-
-# Run inference
-result = model.inference(input_tif)
-```
-
-Alternatively, upload your input file to the Hugging Face Demo:
-https://huggingface.co/spaces/ibm-nasa-geospatial/Prithvi-100M-sen1floods11-demo
-""")
 
 def run_flood_pipeline():
     """Main pipeline execution"""
@@ -397,17 +345,6 @@ def run_flood_pipeline():
         print("✅ FLOOD PIPELINE COMPLETE!")
         print("="*60)
         print(f"\nInput file ready for Prithvi model: {OUTPUT_TIF}")
-        # print("\nNext steps:")
-        # print("  1. Upload to Hugging Face Demo:")
-        # print("     https://huggingface.co/spaces/ibm-nasa-geospatial/Prithvi-100M-sen1floods11-demo")
-        # print("\n  2. Or run local inference (see run_inference_with_model function)")
-        # if (data):
-        #     print("\nFile specifications:")
-        #     print(f"  - Format: GeoTIFF")
-        #     print(f"  - Bands: {len(S2_ALL_BANDS)} ({', '.join(S2_ALL_BANDS)})")
-        #     print(f"  - Model bands: {', '.join(MODEL_BANDS)}")
-        #     print(f"  - Scale: Surface Reflectance × 10000")
-        #     print(f"  - Shape: {data.shape}")
 
     except Exception as e:
         print(f"\n❌ Error in pipeline: {e}")

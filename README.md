@@ -87,7 +87,7 @@ The Docker agent image includes the local flood-segmentation stack for
 and fine-tuned checkpoint into `/app/models/huggingface`, so inference can run
 without waiting for the 1.28GB model download at first execution.
 
-The flood pipeline writes its inputs and outputs under `scripts/`. Compose mounts
+The flood pipeline lives under `scripts/prithvi_flood_seg/`. Compose mounts
 `./scripts` to `/app/scripts`, so container output files appear on the host.
 
 ### Build
@@ -111,23 +111,23 @@ DOWNLOAD_PRITHVI2_MODEL=false docker compose build agent
 
 First create the Sentinel-2 GeoTIFF input:
 ```bash
-docker compose run --rm agent python /app/scripts/copernicus_flood_segmentation.py
+docker compose run --rm agent python /app/scripts/prithvi_flood_seg/copernicus_flood_segmentation.py
 ```
 
 Then run Prithvi-EO-2.0 Sen1Floods11:
 ```bash
-docker compose run --rm agent python /app/scripts/prithvi2_flood_inference.py --device auto
+docker compose run --rm agent python /app/scripts/prithvi_flood_seg/prithvi2_flood_inference.py --device auto
 ```
 
 Expected outputs:
 ```text
-scripts/prithvi2_flood_prediction.tif
-scripts/prithvi2_flood_prediction_preview.png
+scripts/prithvi_flood_seg/prithvi2_flood_prediction.tif
+scripts/prithvi_flood_seg/prithvi2_flood_prediction_preview.png
 ```
 
 For the full automated flow, including vegetation/water postprocessing:
 ```bash
-docker compose run --rm agent bash /app/scripts/run_flood_detection_pipeline.sh
+docker compose run --rm agent bash /app/scripts/prithvi_flood_seg/run_flood_detection_pipeline.sh
 ```
 
 For more details and threshold tuning, see

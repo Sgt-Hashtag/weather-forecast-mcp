@@ -18,6 +18,14 @@ scripts/*.zip
 scripts/*.json
 scripts/*.csv
 scripts/*.log
+scripts/**/*.tif
+scripts/**/*.tiff
+scripts/**/*.png
+scripts/**/*.nc
+scripts/**/*.zip
+scripts/**/*.json
+scripts/**/*.csv
+scripts/**/*.log
 
 models
 checkpoints
